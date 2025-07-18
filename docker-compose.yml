@@ -1,0 +1,55 @@
+services:
+  # Local PostgreSQL database
+  db:
+    image: postgres:16-alpine
+    container_name: vykazy-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      TZ: Europe/Bratislava
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+      - ./backend/sql/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    ports:
+      - "${DB_PORT:-55432}:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Your application
+  app:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: vykazy-app
+    ports:
+      - "${API_PORT:-8003}:8000"
+    env_file:
+      - backend/.env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./frontend:/app/frontend:ro
+    # # Resource limits for Pi (optional)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 1G
+    #     reservations:
+    #       memory: 512M
+
+

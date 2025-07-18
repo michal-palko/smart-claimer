@@ -1,0 +1,606 @@
+/* Jira Issue Widget Styles */
+
+/* ---------- Widget Container ---------- */
+.jira-widget {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: calc(50% - 15px);
+    height: 100vh;
+    background: white;
+    z-index: 1000;
+    box-shadow: -2px 0 8px rgba(0,0,0,0.1);
+    padding: 10px;
+    transform: translateX(100%);
+    transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+    overflow-y: auto;
+    display: none;
+    opacity: 0;
+    border-left: 1px solid #ddd;
+}
+
+@media (min-width: 992px) {
+    .jira-widget {
+        width: calc((100% - 30px) / 2);
+        right: calc((100% - 1320px) / 2 + 15px);
+        max-width: calc(1320px / 2 - 15px);
+        top: 5rem;
+        height: calc(100vh - 10rem);
+        padding: 0.5rem;
+    }
+}
+
+@media (max-width: 991.98px) {
+    .jira-widget {
+        width: 100%;
+    }
+}
+
+@media (max-width: 768px) {
+    .jira-widget {
+        width: calc(100% - 48px);
+        right: 24px;
+    }
+}
+
+.jira-widget.active {
+    transform: translateX(0);
+    opacity: 1;
+    display: block;
+    border-radius: 10px;
+}
+
+.jira-widget.error {
+    border-color: #dc3545;
+    background-color: #fff5f5;
+}
+
+/* ---------- Widget Content Container ---------- */
+.jira-content {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 8px;
+    background: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    display: none;
+    opacity: 0;
+    transform: translateY(-10px);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+    max-width: 100%;
+    height: 100%;
+    overflow-y: auto;
+    padding-right: 0.5rem;
+    position: relative;
+}
+
+.jira-widget:not(.collapsed) .jira-content {
+    display: block;
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.jira-content a {
+    position: relative;
+    z-index: 1001;
+}
+
+/* ---------- Close Button ---------- */
+.jira-close {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 24px;
+    height: 24px;
+    background: transparent;
+    border: none;
+    border-radius: 50%;
+    color: #666;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    transition: all 0.2s ease;
+    z-index: 1001;
+}
+
+.jira-close:hover {
+    color: #333;
+    background: rgba(0,0,0,0.1);
+}
+
+.jira-close::before,
+.jira-close::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 2px;
+    background-color: #666;
+    transform-origin: center;
+    transition: background-color 0.2s ease;
+}
+
+.jira-close::before {
+    transform: rotate(45deg);
+}
+
+.jira-close::after {
+    transform: rotate(-45deg);
+}
+
+.jira-close:hover::before,
+.jira-close:hover::after {
+    background-color: #333;
+}
+
+/* ---------- Widget Header & Components ---------- */
+.jira-widget-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+    padding-right: 40px;
+    padding-left: 4px;
+}
+
+.jira-widget-key {
+    display: inline-block;
+    font-size: 16px;
+    font-weight: 600;
+    margin-right: 12px;
+    color: #0052CC;
+    text-decoration: none;
+}
+
+.jira-widget-key:hover {
+    text-decoration: underline;
+}
+
+.jira-issue-summary {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0 0 12px;
+    padding-right: 24px; /* Space for close button */
+    color: #333;
+}
+
+.jira-summary {
+    font-weight: 600;
+    font-size: 16px;
+    margin: 8px 0;
+    color: #172B4D;
+}
+
+/* ---------- Status & Priority ---------- */
+.jira-status {
+    /*! display: inline-block; */
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-weight: 500;
+    background-color: #0052cc;
+    color: white;
+    /*! margin: 0 12px 12px 0; */
+}
+
+.status-green {
+    background-color: #36B37E;
+    color: white;
+}
+
+.status-yellow {
+    background-color: #FFAB00;
+    color: #172B4D;
+}
+
+.status-red {
+    background-color: #ffebe6;
+    color: #bf2600;
+}
+
+.status-grey {
+    background-color: #6B778C;
+    color: white;
+}
+
+.jira-priority {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    /*! margin: 0 12px 12px 0; */
+    padding: 4px 8px;
+    border-radius: 3px;
+    font-size: 13px;
+    font-weight: 500;
+    background-color: #ebecf0;
+    color: #172b4d;
+}
+
+.jira-priority img {
+    width: 16px;
+    height: 16px;
+}
+
+/* ---------- Description & Comment Content ---------- */
+.jira-description, 
+.jira-comment-body {
+    overflow-wrap: break-word;
+    word-wrap: break-word;
+    color: #172B4D;
+    line-height: 1.6;
+}
+
+.jira-description {
+    padding: 8px 0;
+    border-top: 1px solid #ddd;
+    margin: 8px 0;
+    font-size: 14px;
+}
+
+.jira-description br,
+.jira-comment-body br {
+    display: block;
+    margin: 0;
+    content: "";
+    line-height: 1.2;
+}
+
+.jira-description p,
+.jira-comment-body p {
+    margin: 4px 0;
+}
+
+/* Fix spacing between paragraphs and lists */
+.jira-description p + ul,
+.jira-description p + ol,
+.jira-comment-body p + ul,
+.jira-comment-body p + ol {
+    margin-top: 2px;
+}
+
+.jira-description ul + p,
+.jira-description ol + p,
+.jira-comment-body ul + p,
+.jira-comment-body ol + p {
+    margin-top: 4px;
+}
+
+.jira-description ul,
+.jira-description ol,
+.jira-comment-body ul,
+.jira-comment-body ol {
+    padding-left: 24px;
+    margin: 12px 0;
+}
+
+.jira-description li,
+.jira-comment-body li {
+    margin: 6px 0;
+}
+
+.jira-description code,
+.jira-comment-body code {
+    background: #f4f5f7;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 0.9em;
+    color: #172B4D;
+}
+
+.jira-description pre,
+.jira-comment-body pre {
+    background: #f4f5f7;
+    padding: 12px;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin: 12px 0;
+    font-family: monospace;
+    font-size: 13px;
+    line-height: 1.4;
+    color: #172B4D;
+}
+
+.jira-description blockquote,
+.jira-comment-body blockquote {
+    border-left: 4px solid #dfe1e6;
+    margin: 12px 0;
+    padding: 0 12px;
+    color: #5e6c84;
+}
+
+/* Links in content */
+.jira-description a,
+.jira-comment-body a {
+    color: #0052CC;
+    text-decoration: none;
+}
+
+.jira-description a:hover,
+.jira-comment-body a:hover {
+    text-decoration: underline;
+}
+
+/* ---------- Comments ---------- */
+.jira-comments {
+    margin-top: 16px;
+}
+
+.jira-comment {
+    margin: 8px 0;
+    padding: 8px;
+    background: #f4f5f7;
+    border-radius: 4px;
+}
+
+.jira-comment-header {
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.jira-comment-author {
+    font-weight: 500;
+    margin-right: 8px;
+}
+
+.jira-comment-date {
+    color: #5e6c84;
+    font-size: 12px;
+}
+
+/* ---------- Toggle & Search Buttons ---------- */
+.jira-search-btn {
+    width: 24px;
+    height: 24px;
+    min-width: 24px; /* Prevent shrinking */
+    padding: 0;
+    background: #0052CC;
+    color: white;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: bold;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: serif;
+    margin-left: 4px; /* Small space from input field */
+}
+
+.jira-search-btn i {
+    font-style: normal;
+    font-weight: bold;
+    font-family: serif;
+}
+
+.jira-search-btn:hover {
+    background-color: #0747A6;
+    transform: scale(1.05);
+}
+
+.jira-search-btn:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(0,82,204,0.3);
+}
+
+.jira-search-btn.active {
+    background-color: #0747A6;
+}
+
+.jira-toggle-container {
+    display: flex;
+    align-items: center;
+    padding-top: 6px; /* Align with input field */
+}
+
+.jira-toggle {
+    padding: 0.25rem 0.75rem;
+    background: #f4f5f7;
+    border: 1px solid #dfe1e6;
+    border-radius: 3px;
+    color: #42526e;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    margin-left: auto;
+    z-index: 1;
+}
+
+.jira-toggle:hover {
+    background: #ebecf0;
+    color: #0052cc;
+    border-color: #c1c7d0;
+}
+
+/* ---------- Input Form Styles ---------- */
+.form-group {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: flex-start;
+}
+
+.input-clear-wrapper {
+    position: relative;
+    flex: 1;
+    min-width: 200px;
+    display: flex;
+    align-items: center;
+    z-index: 1; /* Ensure input stays above widget */
+}
+
+.input-clear-wrapper input {
+    flex: 1;
+    width: calc(100% - 32px); /* Space for info button */
+    padding-right: 25px; /* Space for the clear button */
+}
+
+.input-clear-wrapper .jira-toggle {
+    position: absolute;
+    right: -32px;  /* Position it outside the input */
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 1;  /* Lower z-index to be behind the clear button */
+    background: #0d6efd;
+    border: none;
+    color: white;
+    padding: 4px 12px;
+    font-size: 13px;
+    display: none; /* Hidden by default */
+}
+
+.input-clear-wrapper .jira-toggle:hover {
+    background: #0b5ed7;
+}
+
+/* Style for the clear button inside input */
+.input-clear-btn {
+    position: absolute;
+    right: 40px; /* Position before the info button */
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    color: #666;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    padding: 0;
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1;
+}
+
+.jira-search-container {
+    position: relative;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ---------- Dark Mode Styles ---------- */
+[data-theme="dark"] .jira-widget,
+.darkmode--activated .jira-widget {
+    background: #1e1e1e;
+    border-color: #444;
+    border-left: 1px solid #333;
+}
+
+[data-theme="dark"] .jira-content,
+.darkmode--activated .jira-content {
+    background: #ffffff;
+    border-color: #dfe1e6;
+}
+
+[data-theme="dark"] .jira-issue-summary,
+.darkmode--activated .jira-issue-summary {
+    color: #e1e1e1;
+}
+
+[data-theme="dark"] .jira-widget-key,
+.darkmode--activated .jira-widget-key {
+    color: #4C9AFF;
+}
+
+[data-theme="dark"] .jira-priority,
+.darkmode--activated .jira-priority {
+    background-color: #2d3033;
+    color: #e1e1e1;
+}
+
+[data-theme="dark"] .jira-summary,
+[data-theme="dark"] .jira-description,
+.darkmode--activated .jira-summary,
+.darkmode--activated .jira-description {
+    color: #E1E1E1;
+}
+
+[data-theme="dark"] .jira-description,
+.darkmode--activated .jira-description {
+    border-color: #333;
+}
+
+[data-theme="dark"] .jira-comment,
+.darkmode--activated .jira-comment {
+    background: #2d3033;
+}
+
+[data-theme="dark"] .jira-comment-date,
+.darkmode--activated .jira-comment-date {
+    color: #a0a0a0;
+}
+
+[data-theme="dark"] .jira-comment-body,
+.darkmode--activated .jira-comment-body {
+    color: #E1E1E1;
+}
+
+[data-theme="dark"] .jira-description code,
+[data-theme="dark"] .jira-comment-body code,
+.darkmode--activated .jira-description code,
+.darkmode--activated .jira-comment-body code {
+    background: #f4f5f7;
+    color: #172B4D;
+    border: 1px solid #dfe1e6;
+}
+
+[data-theme="dark"] .jira-description pre,
+[data-theme="dark"] .jira-comment-body pre,
+.darkmode--activated .jira-description pre,
+.darkmode--activated .jira-comment-body pre {
+    background: #f4f5f7;
+    color: #172B4D;
+    border: 1px solid #dfe1e6;
+}
+
+[data-theme="dark"] .jira-description a,
+[data-theme="dark"] .jira-comment-body a,
+.darkmode--activated .jira-description a,
+.darkmode--activated .jira-comment-body a {
+    color: #0052CC;
+}
+
+[data-theme="dark"] .jira-close::before,
+[data-theme="dark"] .jira-close::after,
+.darkmode--activated .jira-close::before,
+.darkmode--activated .jira-close::after {
+    background-color: #999;
+}
+
+[data-theme="dark"] .jira-close:hover::before,
+[data-theme="dark"] .jira-close:hover::after,
+.darkmode--activated .jira-close:hover::before,
+.darkmode--activated .jira-close:hover::after {
+    background-color: #ccc;
+}
+
+.darkmode--activated .jira-toggle {
+    background: #2c3547;
+    border-color: #404040;
+    color: #c1c7d0;
+}
+
+.darkmode--activated .jira-toggle:hover {
+    background: #3d3d3d;
+    color: #4c9aff;
+    border-color: #505050;
+}
+
+/* Prevent body scrolling when modal is open */
+body.jira-modal-open {
+    overflow: hidden;
+}

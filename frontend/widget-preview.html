@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Jira Widget Preview</title>
+  <link rel="stylesheet" href="jiraWidget.css">
+  <style>
+    body { background: #f8f9fa; }
+  </style>
+</head>
+<body>
+  <button onclick="document.querySelector('.jira-widget').classList.toggle('active')">Toggle Widget</button>
+  <div class="jira-widget active">
+    <button class="jira-close" onclick="document.querySelector('.jira-widget').classList.remove('active')"></button>
+    <div class="jira-content">
+      <div class="jira-widget-header">
+        <span class="jira-widget-key">ABC-123</span>
+        <span class="jira-status status-green">In Progress</span>
+        <span class="jira-priority"><img src="https://cdn-icons-png.flaticon.com/512/1828/1828884.png" alt="High" /> High</span>
+      </div>
+      <div class="jira-summary">Sample Issue Summary</div>
+      <div class="jira-description">
+        <p>This is a <strong>dummy description</strong> for previewing the widget layout.</p>
+        <ul>
+          <li>First item</li>
+          <li>Second item</li>
+        </ul>
+      </div>
+      <div class="jira-comments">
+        <div class="jira-comment">
+          <div class="jira-comment-header">
+            <span class="jira-comment-author">John Doe</span>
+            <span class="jira-comment-date">2025-07-12</span>
+          </div>
+          <div class="jira-comment-body">This is a sample comment for preview.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
