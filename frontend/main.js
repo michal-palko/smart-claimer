@@ -982,22 +982,32 @@ document.getElementById('clearFormBtn').addEventListener('click', function() {
 
 // Autor input at top - syncs with form and reloads entries/templates
 const topAutorInput = document.getElementById('topAutorInput');
-topAutorInput.addEventListener('input', function() {
+topAutorInput.addEventListener('input', async function() {
     form.autor.value = this.value;
-    // Clear MetaApp tasks cache when author changes
+    // Clear both caches when author changes
     metaappTasksCache = [];
     metaappTasksLoadedFor = '';
+    jiraIssuesCache = [];
+    jiraIssuesLoadedFor = '';
     loadEntries();
     renderTemplateDropdown();
+    // Pre-load JIRA issues for the new author
+    const author = this.value.trim();
+    if (author) await fetchJiraIssues(author);
 });
 // Keep form.autor in sync with topAutorInput on change
-form.autor.addEventListener('input', function() {
+form.autor.addEventListener('input', async function() {
     topAutorInput.value = this.value;
-    // Clear MetaApp tasks cache when author changes
+    // Clear both caches when author changes
     metaappTasksCache = [];
     metaappTasksLoadedFor = '';
+    jiraIssuesCache = [];
+    jiraIssuesLoadedFor = '';
     loadEntries();
     renderTemplateDropdown();
+    // Pre-load JIRA issues for the new author
+    const author = this.value.trim();
+    if (author) await fetchJiraIssues(author);
 });
 // On page load, sync form.autor with top input
 form.autor.value = topAutorInput.value;
