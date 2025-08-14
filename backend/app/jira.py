@@ -3,6 +3,7 @@ import requests
 from typing import List, Optional
 from functools import lru_cache
 from dotenv import load_dotenv
+import base64
 
 # Load environment variables from .env file
 load_dotenv()
@@ -15,16 +16,26 @@ JIRA_TOKEN = os.getenv('JIRA_TOKEN')
 if not all([JIRA_URL, JIRA_USER, JIRA_TOKEN]):
     raise ValueError("Missing required JIRA credentials in environment variables. Please check your .env file.")
 
+def get_jira_headers():
+    """Get standardized JIRA headers with authentication"""
+    auth_string = f"{JIRA_USER}:{JIRA_TOKEN}"
+    auth_bytes = auth_string.encode('ascii')
+    auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+    return {
+        "Accept": "application/json",
+        "Authorization": f"Basic {auth_b64}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+
 # Helper to fetch epic color by key (with simple in-memory cache)
 @lru_cache(maxsize=128)
 def fetch_epic_color(epic_key: str) -> Optional[str]:
     if not epic_key:
         return None
     url = f"{JIRA_URL}/rest/api/3/issue/{epic_key}"
-    headers = {"Accept": "application/json"}
-    auth = (JIRA_USER, JIRA_TOKEN)
+    headers = get_jira_headers()
     params = {"fields": "customfield_10011,customfield_10016"}  # customfield_10011: Epic Color, customfield_10016: Epic Name (may vary)
-    resp = requests.get(url, headers=headers, params=params, auth=auth)
+    resp = requests.get(url, headers=headers, params=params)
     if not resp.ok:
         return None
     fields = resp.json().get("fields", {})
@@ -35,7 +46,8 @@ def fetch_epic_color(epic_key: str) -> Optional[str]:
 def get_board_id():
     # Get first board (or filter by name/type if needed)
     url = f"{JIRA_URL}/rest/agile/1.0/board"
-    resp = requests.get(url, auth=(JIRA_USER, JIRA_TOKEN))
+    headers = get_jira_headers()
+    resp = requests.get(url, headers=headers)
     boards = resp.json().get("values", [])
     if not boards:
         raise Exception("No JIRA boards found")
@@ -43,7 +55,8 @@ def get_board_id():
 
 def get_current_and_prior_sprints(board_id):
     url = f"{JIRA_URL}/rest/agile/1.0/board/{board_id}/sprint?state=active,future,closed"
-    resp = requests.get(url, auth=(JIRA_USER, JIRA_TOKEN))
+    headers = get_jira_headers()
+    resp = requests.get(url, headers=headers)
     sprints = resp.json().get("values", [])
     # Find current (active) and most recent closed sprint
     current = next((s for s in sprints if s["state"] == "active"), None)
@@ -54,17 +67,44 @@ def get_current_and_prior_sprints(board_id):
 # JIRA API: Search issues assigned to a user (author) - for dropdown autocomplete
 def fetch_jira_issues_for_author(autor: str) -> List[dict]:
     # Simple JQL: assigned to user, not done, recently updated (no sprint filtering)
+    # Use single quotes instead of double quotes for JQL
     jql = f"assignee = '{autor}' AND updated >= -30d ORDER BY updated DESC"
+    
+    # Try v3 API with different approach
     url = f"{JIRA_URL}/rest/api/3/search"
-    headers = {"Accept": "application/json"}
-    auth = (JIRA_USER, JIRA_TOKEN)
-    params = {
+    
+    # Use standardized headers with authentication
+    headers = get_jira_headers()
+    headers["Content-Type"] = "application/json"
+    
+    # Try POST instead of GET with JSON body
+    data = {
         "jql": jql,
-        "fields": "key,summary,parent,customfield_10020",  # customfield_10020: Sprint
-        "maxResults": 100  # Increased since we're not filtering by sprint
+        "fields": ["key", "summary", "parent", "customfield_10020"],
+        "maxResults": 100
     }
-    resp = requests.get(url, headers=headers, params=params, auth=auth)
-    resp.raise_for_status()
+    
+    try:
+        resp = requests.post(url, headers=headers, json=data)
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        # If POST fails, try GET as fallback
+        print(f"POST failed, trying GET: {e}")
+        headers.pop("Content-Type", None)
+        params = {
+            "jql": jql,
+            "fields": "key,summary,parent,customfield_10020",
+            "maxResults": 100
+        }
+        try:
+            resp = requests.get(url, headers=headers, params=params)
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as e2:
+            print(f"JIRA API Error: {e2}")
+            print(f"Response status: {resp.status_code}")
+            print(f"Response body: {resp.text}")
+            print(f"Request URL: {resp.url}")
+            raise
     issues = resp.json().get("issues", [])
     result = []
     parent_color_cache = {}
@@ -79,7 +119,7 @@ def fetch_jira_issues_for_author(autor: str) -> List[dict]:
         if summary.strip().startswith("Review -") and parent_key:
             # Fetch parent issue to get its parent
             parent_url = f"{JIRA_URL}/rest/api/3/issue/{parent_key}"
-            parent_resp = requests.get(parent_url, headers=headers, auth=auth)
+            parent_resp = requests.get(parent_url, headers=headers)
             if parent_resp.ok:
                 parent_fields = parent_resp.json().get("fields", {})
                 grandparent = parent_fields.get("parent")
@@ -125,9 +165,8 @@ def fetch_jira_issue_by_key(issue_key: str) -> Optional[dict]:
         return None
     
     jql = f"key = '{issue_key}'"
-    url = f"{JIRA_URL}/rest/api/3/search"
-    headers = {"Accept": "application/json"}
-    auth = (JIRA_USER, JIRA_TOKEN)
+    url = f"{JIRA_URL}/rest/api/2/search"
+    headers = get_jira_headers()
     params = {
         "jql": jql,
         "fields": "key,summary,parent,customfield_10020",  # customfield_10020: Sprint
@@ -135,7 +174,7 @@ def fetch_jira_issue_by_key(issue_key: str) -> Optional[dict]:
     }
     
     try:
-        resp = requests.get(url, headers=headers, params=params, auth=auth)
+        resp = requests.get(url, headers=headers, params=params)
         resp.raise_for_status()
         issues = resp.json().get("issues", [])
         
@@ -154,7 +193,7 @@ def fetch_jira_issue_by_key(issue_key: str) -> Optional[dict]:
         if summary.strip().startswith("Review -") and parent_key:
             # Fetch parent issue to get its parent
             parent_url = f"{JIRA_URL}/rest/api/3/issue/{parent_key}"
-            parent_resp = requests.get(parent_url, headers=headers, auth=auth)
+            parent_resp = requests.get(parent_url, headers=headers)
             if parent_resp.ok:
                 parent_fields = parent_resp.json().get("fields", {})
                 grandparent = parent_fields.get("parent")
@@ -277,14 +316,14 @@ def get_issue_details(issue_key: str):
         "Accept": "application/json",
         "Content-Type": "application/json"
     }
-    auth = (JIRA_USER, JIRA_TOKEN)
+    headers.update(get_jira_headers())  # Add authentication to existing headers
     params = {
         "fields": "summary,status,priority,description,comment",
         "expand": "renderedFields"
     }
 
     try:
-        resp = requests.get(url, headers=headers, params=params, auth=auth)
+        resp = requests.get(url, headers=headers, params=params)
         resp.raise_for_status()
         data = resp.json()
         fields = data.get("fields", {})
