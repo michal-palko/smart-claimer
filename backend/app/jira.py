@@ -92,6 +92,7 @@ def _fetch_jira_with_issue_picker(autor: str) -> List[dict]:
     """
     Use the working JIRA issue picker endpoint.
     This endpoint works even when search APIs are deprecated.
+    Enhanced to fetch parent information for each issue.
     """
     url = f"{JIRA_URL}/rest/api/3/issue/picker"
     headers = get_jira_headers()
@@ -114,37 +115,200 @@ def _fetch_jira_with_issue_picker(autor: str) -> List[dict]:
     result = resp.json()
     sections = result.get('sections', [])
     
-    issues = []
+    # Collect issue keys first
+    issue_keys = []
+    issue_summaries = {}
+    
     for section in sections:
         section_issues = section.get('issues', [])
         for issue in section_issues:
-            # Extract issue data from picker format
             key = issue.get('key', '')
             summary = issue.get('summaryText') or issue.get('summary', '')
             
-            # Skip if essential data is missing
-            if not key or not summary:
-                continue
+            if key and summary:
+                issue_keys.append(key)
+                issue_summaries[key] = summary
+    
+    if not issue_keys:
+        print("No issues found in issue picker")
+        return []
+    
+    print(f"Issue picker found {len(issue_keys)} issues, fetching parent details...")
+    
+    # Now fetch detailed information for each issue including parent
+    enhanced_issues = []
+    
+    # Batch process to avoid too many individual calls
+    for i, issue_key in enumerate(issue_keys):
+        try:
+            issue_details = _fetch_issue_details(issue_key, headers)
+            if issue_details:
+                issue_details["summary"] = issue_summaries[issue_key]  # Use picker summary
+                enhanced_issues.append(issue_details)
                 
-            # Get additional details if available
-            issue_data = {
-                "key": key,
-                "summary": summary,
+            # Progress indicator for large sets
+            if i > 0 and i % 20 == 0:
+                print(f"Processed {i}/{len(issue_keys)} issues...")
+                
+        except Exception as e:
+            # Don't fail entire process if one issue fails
+            print(f"Failed to fetch details for {issue_key}: {e}")
+            # Add basic issue info without parent
+            enhanced_issues.append({
+                "key": issue_key,
+                "summary": issue_summaries[issue_key],
                 "parent_key": None,
                 "parent_summary": None,
                 "parent_color": None,
                 "sprint_name": None
-            }
-            
-            # Try to extract parent info if available
-            if 'keyHtml' in issue and 'parent' in issue.get('keyHtml', '').lower():
-                # This would need parsing of HTML content
-                pass
-                
-            issues.append(issue_data)
+            })
     
-    print(f"Issue picker found {len(issues)} issues")
-    return issues[:100]  # Limit to 100 issues
+    print(f"Enhanced {len(enhanced_issues)} issues with parent information")
+    return enhanced_issues[:100]  # Limit to 100 issues
+
+def _fetch_issue_details(issue_key: str, headers: dict) -> Optional[Dict[str, Any]]:
+    """
+    Fetch detailed information for a single issue including parent data.
+    """
+    url = f"{JIRA_URL}/rest/api/3/issue/{issue_key}"
+    
+    # Request specific fields we need
+    params = {
+        "fields": "key,summary,parent,issuelinks,customfield_10020,customfield_10014,customfield_10016"
+    }
+    
+    resp = requests.get(url, headers=headers, params=params)
+    
+    if not resp.ok:
+        return None
+    
+    issue_data = resp.json()
+    fields = issue_data.get('fields', {})
+    
+    # Extract basic issue info
+    result = {
+        "key": issue_key,
+        "summary": "",  # Will be set by caller
+        "parent_key": None,
+        "parent_summary": None,
+        "parent_color": None,
+        "sprint_name": None
+    }
+    
+    # Extract parent information
+    parent = fields.get('parent')
+    if parent:
+        result["parent_key"] = parent.get('key')
+        parent_fields = parent.get('fields', {})
+        result["parent_summary"] = parent_fields.get('summary', '')
+        
+        # Try to get parent color if it's an epic
+        parent_key = result["parent_key"]
+        if parent_key:
+            try:
+                parent_color = fetch_epic_color(parent_key)
+                result["parent_color"] = parent_color
+            except:
+                pass  # Color is optional
+    
+    # Check for epic link in custom fields (alternative to parent)
+    if not result["parent_key"]:
+        epic_link = fields.get('customfield_10014') or fields.get('customfield_10016')
+        if epic_link:
+            # Epic link might be just a key or an object
+            if isinstance(epic_link, str):
+                result["parent_key"] = epic_link
+            elif isinstance(epic_link, dict):
+                result["parent_key"] = epic_link.get('key')
+                result["parent_summary"] = epic_link.get('summary', '')
+    
+    # Special handling for Review issues - use grandparent instead of parent
+    issue_summary = fields.get('summary', '') or ""
+    if issue_summary.lower().startswith('review') and result["parent_key"]:
+        try:
+            # Fetch the parent's parent (grandparent)
+            grandparent_info = _fetch_grandparent_info(result["parent_key"], headers)
+            if grandparent_info:
+                # Replace parent with grandparent for Review issues
+                result["parent_key"] = grandparent_info["key"]
+                result["parent_summary"] = grandparent_info["summary"]
+                result["parent_color"] = grandparent_info["color"]
+                print(f"Review issue {issue_key}: Using grandparent {grandparent_info['key']}")
+        except Exception as e:
+            print(f"Failed to fetch grandparent for review issue {issue_key}: {e}")
+            # Keep original parent if grandparent fetch fails
+    
+    # Extract sprint information if available
+    sprint_field = fields.get('customfield_10020')  # Common sprint field
+    if sprint_field and isinstance(sprint_field, list) and sprint_field:
+        # Sprint is usually an array, take the first active one
+        sprint = sprint_field[0]
+        if isinstance(sprint, dict):
+            result["sprint_name"] = sprint.get('name', '')
+        elif isinstance(sprint, str) and 'name=' in sprint:
+            # Parse sprint string format
+            try:
+                name_part = sprint.split('name=')[1].split(',')[0]
+                result["sprint_name"] = name_part
+            except:
+                pass
+    
+    return result
+
+def _fetch_grandparent_info(parent_key: str, headers: dict) -> Optional[Dict[str, Any]]:
+    """
+    Fetch grandparent information for Review issues.
+    Returns the parent of the given parent issue.
+    """
+    if not parent_key:
+        return None
+    
+    url = f"{JIRA_URL}/rest/api/3/issue/{parent_key}"
+    params = {
+        "fields": "key,summary,parent,customfield_10014,customfield_10016"
+    }
+    
+    resp = requests.get(url, headers=headers, params=params)
+    if not resp.ok:
+        return None
+    
+    parent_data = resp.json()
+    parent_fields = parent_data.get('fields', {})
+    
+    # Look for grandparent (parent's parent)
+    grandparent = parent_fields.get('parent')
+    if grandparent:
+        grandparent_key = grandparent.get('key')
+        grandparent_fields = grandparent.get('fields', {})
+        grandparent_summary = grandparent_fields.get('summary', '')
+        
+        # Try to get grandparent color
+        grandparent_color = None
+        if grandparent_key:
+            try:
+                grandparent_color = fetch_epic_color(grandparent_key)
+            except:
+                pass
+        
+        return {
+            "key": grandparent_key,
+            "summary": grandparent_summary,
+            "color": grandparent_color
+        }
+    
+    # Check for epic link as alternative
+    epic_link = parent_fields.get('customfield_10014') or parent_fields.get('customfield_10016')
+    if epic_link:
+        if isinstance(epic_link, str):
+            return {"key": epic_link, "summary": "", "color": None}
+        elif isinstance(epic_link, dict):
+            return {
+                "key": epic_link.get('key'),
+                "summary": epic_link.get('summary', ''),
+                "color": None
+            }
+    
+    return None
 
 def _fetch_jira_with_new_search_api(autor: str) -> List[dict]:
     """Use the newer enhanced search API"""
