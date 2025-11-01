@@ -1229,8 +1229,25 @@ function renderJiraSuggestions(suggestions) {
             let badgeColor = colorForJiraParent(issue.parent_key);
             badgeStyle = `class=\"badge ${badgeColor} me-2\"`;
         }
-        // Show code + summary in dropdown, only code in input
-        return `<div class=\"search-suggestion\" data-key=\"${issue.key}\"><span ${badgeStyle}>${issue.key}</span> <span style=\"font-weight:500;\">${issue.summary}</span>${parentHtml}</div>`;
+        // Add status badge if available
+        let statusHtml = '';
+        if (issue.status) {
+            statusHtml = `<span class=\"badge bg-light text-primary ms-2\" style=\"font-size:0.75em;\">${issue.status}</span>`;
+        }
+        // Add assignee badge if available and different from current user (for global search results)
+        let assigneeHtml = '';
+        if (issue.assignee) {
+            // Get current user email from form (stored in autor field)
+            const currentUserEmail = form.autor.value.trim().toLowerCase();
+            const assigneeEmail = (issue.assignee_email || '').toLowerCase();
+            
+            // Show badge only if assignee email is different from current user
+            if (assigneeEmail && assigneeEmail !== currentUserEmail) {
+                assigneeHtml = `<span class=\"badge bg-warning text-dark ms-2\" style=\"font-size:0.75em;\">👤 ${issue.assignee}</span>`;
+            }
+        }
+        // Show code + summary + status + assignee in dropdown, only code in input
+        return `<div class=\"search-suggestion\" data-key=\"${issue.key}\"><span ${badgeStyle}>${issue.key}</span> <span style=\"font-weight:500;\">${issue.summary}</span>${statusHtml}${assigneeHtml}${parentHtml}</div>`;
     }).join('');
 }
 
@@ -1551,11 +1568,15 @@ function attachJiraAutocomplete() {
     }
 
     async function updateSuggestions() {
-        // Always allow typing and suggestions (never readonly)
+        // Fetch fresh issues from API (only called on click/focus)
         const author = form.autor.value.trim();
         if (!author) return;
         await fetchJiraIssues(author);
-        // --- Filter by Úloha if filled ---
+        filterAndShowSuggestions();
+    }
+
+    async function filterAndShowSuggestions() {
+        // Filter already-fetched issues (called on typing)
         let filtered = jiraIssuesCache;
         const ulohaVal = form.uloha.dataset.code || form.uloha.value.split(':')[0].trim();
         if (ulohaVal) {
@@ -1563,13 +1584,65 @@ function attachJiraAutocomplete() {
         }
         const val = jiraInput.value.trim();
         const suggestions = filterJiraIssues(filtered, val);
-        suggBox.innerHTML = renderJiraSuggestions(suggestions);
-        // Show suggestions only if there are actual suggestions, or during loading/error states
-        if (jiraLoading || jiraError || suggestions.length > 0) {
+        
+        // If no matches found and user typed something, search all issues
+        if (suggestions.length === 0 && val.length >= 3) {
+            console.log('[JIRA] No matches in sprint cache, searching all user issues for:', val);
+            suggBox.innerHTML = '<div class="search-suggestion">Hľadám vo všetkých úlohách...</div>';
             suggBox.style.display = 'block';
+            
+            try {
+                const author = form.autor.value.trim();
+                const resp = await fetch(`/api/jira-search-all?autor=${encodeURIComponent(author)}&query=${encodeURIComponent(val)}`);
+                if (resp.ok) {
+                    const allIssues = await resp.json();
+                    console.log('[JIRA] Found', allIssues.length, 'issues in user\'s global search');
+                    
+                    if (allIssues.length > 0) {
+                        suggBox.innerHTML = renderJiraSuggestions(allIssues);
+                        suggBox.style.display = 'block';
+                    } else {
+                        // No matches in user's issues, search ALL issues without assignee filter
+                        console.log('[JIRA] No matches in user issues, searching ALL JIRA issues for:', val);
+                        suggBox.innerHTML = '<div class="search-suggestion">Hľadám vo všetkých JIRA úlohách...</div>';
+                        
+                        const respAll = await fetch(`/api/jira-search-all?query=${encodeURIComponent(val)}`);
+                        if (respAll.ok) {
+                            const anyIssues = await respAll.json();
+                            console.log('[JIRA] Found', anyIssues.length, 'issues in global JIRA search');
+                            
+                            if (anyIssues.length > 0) {
+                                suggBox.innerHTML = renderJiraSuggestions(anyIssues);
+                                suggBox.style.display = 'block';
+                            } else {
+                                suggBox.innerHTML = '<div class="search-suggestion text-muted">Nenašli sa žiadne úlohy</div>';
+                                suggBox.style.display = 'block';
+                            }
+                        } else {
+                            suggBox.innerHTML = '<div class="search-suggestion text-muted">Nenašli sa žiadne úlohy</div>';
+                            suggBox.style.display = 'block';
+                        }
+                    }
+                } else {
+                    console.error('[JIRA] Global search failed');
+                    suggBox.innerHTML = renderJiraSuggestions(suggestions);
+                    suggBox.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('[JIRA] Global search error:', error);
+                suggBox.innerHTML = renderJiraSuggestions(suggestions);
+                suggBox.style.display = 'none';
+            }
         } else {
-            suggBox.style.display = 'none';
+            suggBox.innerHTML = renderJiraSuggestions(suggestions);
+            // Show suggestions only if there are actual suggestions, or during loading/error states
+            if (jiraLoading || jiraError || suggestions.length > 0) {
+                suggBox.style.display = 'block';
+            } else {
+                suggBox.style.display = 'none';
+            }
         }
+        
         jiraCurrentIndex = -1; // Reset selection
         updateJiraHighlight();
     }
@@ -1618,7 +1691,7 @@ function attachJiraAutocomplete() {
     });
 
     jiraInput.addEventListener('click', async () => { await updateSuggestions(); });
-    jiraInput.addEventListener('input', async () => { await updateSuggestions(); });
+    jiraInput.addEventListener('input', () => { filterAndShowSuggestions(); }); // Only filter, don't fetch
     jiraInput.addEventListener('blur', function() {
         blurTimeout = setTimeout(() => { 
             suggBox.style.display = 'none';

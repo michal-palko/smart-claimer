@@ -99,20 +99,23 @@ def fetch_jira_issues_for_author(autor: str) -> List[dict]:
     """
     Fast fetch of JIRA issues for current sprint only.
     Returns basic info (key + summary) without parent lookups for speed.
-    Uses issue picker endpoint (search API is deprecated with 410 error).
+    Uses openSprints() JQL function - server-side, fast, includes ALL sprint items.
+    Uses /rest/api/3/search/jql endpoint (new API, not deprecated).
     """
     print(f"[JIRA Fetch] Fetching issues for {autor} from current sprint (no cache, no parent lookup)")
     
-    # Simple JQL: assignee in active/future sprints
+    # Use openSprints() directly - single API call, server-side filtering
+    # This is fast and includes ALL items in active sprints (backlog, active, review tasks)
     jql = f'assignee = "{autor}" AND sprint in openSprints() ORDER BY updated DESC'
+    print(f"[JIRA Fetch] JQL: {jql}")
     
-    url = f"{JIRA_URL}/rest/api/3/issue/picker"
+    # Use the new /rest/api/3/search/jql endpoint (replaces deprecated /search)
+    url = f"{JIRA_URL}/rest/api/3/search/jql"
     headers = get_jira_headers()
     params = {
-        "query": "",  # Empty query with JQL works
-        "currentJQL": jql,
-        "maxResults": 100,
-        "showSubTasks": "true"
+        "jql": jql,
+        "fields": "key,summary,status",  # Added status field
+        "maxResults": 200  # Match Power Query page size
     }
     
     try:
@@ -120,31 +123,38 @@ def fetch_jira_issues_for_author(autor: str) -> List[dict]:
         resp.raise_for_status()
         
         result = resp.json()
-        sections = result.get("sections", [])
+        issues_raw = result.get("issues", [])
+        total = result.get("total", 0)
         
-        # Collect issues from all sections
+        # Transform to simple format
         issues = []
-        for section in sections:
-            section_issues = section.get("issues", [])
-            for issue in section_issues:
-                key = issue.get("key", "")
-                summary = issue.get("summaryText") or issue.get("summary", "")
-                if key and summary:
-                    issues.append({
-                        "key": key,
-                        "summary": summary
-                    })
+        for issue in issues_raw:
+            key = issue.get("key", "")
+            fields = issue.get("fields", {})
+            summary = fields.get("summary", "")
+            status = fields.get("status", {}).get("name", "")
+            if key and summary:
+                issues.append({
+                    "key": key,
+                    "summary": summary,
+                    "status": status
+                })
         
-        print(f"[JIRA Fetch] Found {len(issues)} issues from {len(sections)} sections")
+        print(f"[JIRA Fetch] Found {len(issues)} issues (total={total})")
+        
+        # Check for benchmark issue
+        issue_keys = [i["key"] for i in issues]
+        if "TATRAVAG-4075" in issue_keys:
+            print(f"[JIRA Fetch] ✓ Benchmark issue TATRAVAG-4075 found!")
         
         # Set metadata for endpoint headers
         fetch_jira_issues_for_author.last_meta = {
-            "source": "issue_picker",
+            "source": "search_jql",
             "limit": params["maxResults"],
             "requested": params["maxResults"],
             "returned": len(issues),
-            "reported_total": len(issues),
-            "note": "fast_mode_current_sprint_only"
+            "reported_total": total,
+            "note": "openSprints() - server-side filtering"
         }
         
         return issues
@@ -152,7 +162,7 @@ def fetch_jira_issues_for_author(autor: str) -> List[dict]:
     except Exception as e:
         print(f"[JIRA Fetch] Failed: {e}")
         fetch_jira_issues_for_author.last_meta = {
-            "source": "issue_picker",
+            "source": "search_jql",
             "note": f"error: {str(e)}"
         }
         return []

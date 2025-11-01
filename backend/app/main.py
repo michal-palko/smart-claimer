@@ -446,6 +446,68 @@ async def get_jira_issue_parent(issue_key: str):
         print(f"[API] Error fetching parent for {issue_key}: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching parent: {str(e)}")
 
+@app.get("/api/jira-search-all")
+async def search_all_jira_issues(query: str = Query(...), autor: str = Query(None)):
+    """Search ALL issues (optionally filtered by assignee) regardless of sprint/status"""
+    if not query:
+        return []
+    
+    from .jira import get_jira_headers, JIRA_URL
+    import requests
+    
+    if autor:
+        print(f"[API] Searching all issues for {autor} with query: {query}")
+        # JQL to search issues assigned to specific user
+        jql = f'assignee = "{autor}" AND (key ~ "{query}" OR summary ~ "{query}*") ORDER BY updated DESC'
+    else:
+        print(f"[API] Searching ALL JIRA issues (no assignee filter) with query: {query}")
+        # JQL to search ALL issues without assignee filter
+        jql = f'(key ~ "{query}" OR summary ~ "{query}*") ORDER BY updated DESC'
+    
+    try:
+        headers = get_jira_headers()
+        
+        # Use /search/jql endpoint (not deprecated like /search)
+        url = f"{JIRA_URL}/rest/api/3/search/jql"
+        params = {
+            "jql": jql,
+            "fields": "summary,status,assignee",  # Include assignee for global search
+            "maxResults": 50
+        }
+        
+        resp = requests.get(url, headers=headers, params=params)
+        if not resp.ok:
+            print(f"[JIRA] Search all failed: {resp.status_code} - {resp.text}")
+            return []
+        
+        data = resp.json()
+        issues = []
+        
+        for item in data.get("issues", []):
+            key = item.get("key", "")
+            fields = item.get("fields", {})
+            summary = fields.get("summary", "")
+            status = fields.get("status", {}).get("name", "")
+            assignee_obj = fields.get("assignee")
+            # Get both email and display name for comparison
+            assignee_email = assignee_obj.get("emailAddress") if assignee_obj else None
+            assignee_name = assignee_obj.get("displayName") if assignee_obj else None
+            
+            issues.append({
+                "key": key,
+                "summary": summary,
+                "status": status,
+                "assignee": assignee_name,
+                "assignee_email": assignee_email
+            })
+        
+        print(f"[JIRA] Found {len(issues)} issues in global search")
+        return issues
+        
+    except Exception as e:
+        print(f"[JIRA] Error in global search: {e}")
+        return []
+
 @app.get("/api/jira-debug/{issue_key}")
 async def get_jira_issue_debug(issue_key: str):
     """Debug endpoint to see raw JIRA data structure."""
