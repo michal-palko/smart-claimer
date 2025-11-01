@@ -336,41 +336,70 @@ window.deleteEntry = async function(id) {
 window.duplicateEntry = function(id) {
     const entry = allEntries.find(e => e.id === id);
     if (!entry) return;
-    document.getElementById('editId').value = '';
-    document.getElementById('editUloha').value = entry.uloha;
-    document.getElementById('editDatum').value = entry.datum;
-    document.getElementById('editHodiny').value = entry.hodiny;
-    document.getElementById('editMinuty').value = entry.minuty;
-    document.getElementById('editJira').value = entry.jira || '';
-    document.getElementById('editPopis').value = entry.popis || '';
-    // Set author to current author (from form.autor)
-    // (No author field in modal, but will use form.autor on submit)
-    autoExpandTextarea(document.getElementById('editPopis'));
-    updateCounter('editPopis', 'editPopisCounter');
-    document.getElementById('editModalLabel').textContent = 'Duplikovať záznam';
-    editModal.show();
-    editForm.setAttribute('data-duplicate', 'true');
+    
+    // Populate main form for duplicate
+    form.uloha.value = entry.uloha || '';
+    form.uloha.dataset.code = entry.uloha ? entry.uloha.split(':')[0].trim() : '';
+    form.datum.value = entry.datum || '';
+    form.hodiny.value = entry.hodiny || 0;
+    form.minuty.value = entry.minuty || 0;
+    form.jira.value = entry.jira || '';
+    form.jira.dataset.code = entry.jira ? entry.jira.split(':')[0].trim() : '';
+    form.popis.value = entry.popis || '';
+    
+    // Update textarea and counter
+    autoExpandTextarea(form.popis);
+    updateCounter('popis', 'popisCounter');
+    
+    // Mark form as duplicate mode (no entry ID)
+    form.removeAttribute('data-edit-id');
+    form.setAttribute('data-mode', 'duplicate');
+    
+    // Update submit button text and color (orange for duplicate)
+    const submitBtn = document.getElementById('submitBtn');
+    submitBtn.textContent = 'Duplikovať záznam';
+    submitBtn.className = 'btn btn-warning';
+    
+    // Show cancel button and scroll to form
+    document.getElementById('cancelEditBtn').style.display = 'inline-block';
+    form.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 window.editEntry = function(id) {
     const entry = allEntries.find(e => e.id === id);
     if (!entry) return;
+    
     if (showAllEntries && entry.autor !== form.autor.value.trim()) {
         alert('Nemôžete upraviť záznamy iných autorov!');
         return;
     }
-    document.getElementById('editId').value = entry.id;
-    document.getElementById('editUloha').value = entry.uloha;
-    document.getElementById('editDatum').value = entry.datum;
-    document.getElementById('editHodiny').value = entry.hodiny;
-    document.getElementById('editMinuty').value = entry.minuty;
-    document.getElementById('editJira').value = entry.jira || '';
-    document.getElementById('editPopis').value = entry.popis || '';
-    autoExpandTextarea(document.getElementById('editPopis'));
-    updateCounter('editPopis', 'editPopisCounter');
-    document.getElementById('editModalLabel').textContent = 'Upraviť záznam';
-    editModal.show();
-    editForm.removeAttribute('data-duplicate');
+    
+    // Populate main form for edit
+    form.uloha.value = entry.uloha || '';
+    form.uloha.dataset.code = entry.uloha ? entry.uloha.split(':')[0].trim() : '';
+    form.datum.value = entry.datum || '';
+    form.hodiny.value = entry.hodiny || 0;
+    form.minuty.value = entry.minuty || 0;
+    form.jira.value = entry.jira || '';
+    form.jira.dataset.code = entry.jira ? entry.jira.split(':')[0].trim() : '';
+    form.popis.value = entry.popis || '';
+    
+    // Update textarea and counter
+    autoExpandTextarea(form.popis);
+    updateCounter('popis', 'popisCounter');
+    
+    // Mark form as edit mode with entry ID
+    form.setAttribute('data-edit-id', id);
+    form.setAttribute('data-mode', 'edit');
+    
+    // Update submit button text and color (blue for edit)
+    const submitBtn = document.getElementById('submitBtn');
+    submitBtn.textContent = 'Uložiť zmeny';
+    submitBtn.className = 'btn btn-info';
+    
+    // Show cancel button and scroll to form
+    document.getElementById('cancelEditBtn').style.display = 'inline-block';
+    form.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 editForm.addEventListener('submit', async (e) => {
@@ -523,6 +552,11 @@ editForm.addEventListener('submit', async (e) => {
 form.addEventListener('submit', async (e) => {
     e.preventDefault();
     alertBox.style.display = 'none';
+    
+    // Check if we're in edit or duplicate mode
+    const mode = form.getAttribute('data-mode'); // 'edit' or 'duplicate'
+    const editId = form.getAttribute('data-edit-id');
+    
     // --- Hodiny/Minuty validation ---
     let hodinyVal = form.hodiny.value.trim();
     let minutyVal = form.minuty.value.trim();
@@ -589,7 +623,9 @@ form.addEventListener('submit', async (e) => {
         return;
     }
     
-    console.log('Create form - Found issues:', { 
+    console.log('Form submission - Found issues:', { 
+        mode,
+        editId,
         jira: { key: jiraCode, issue: jiraIssue || jiraIssueFromBroaderSearch }, 
         uloha: { key: ulohaCode, issue: ulohaIssue }
     });
@@ -633,8 +669,20 @@ form.addEventListener('submit', async (e) => {
         if (window.logPerf) {
             window.console.log('[PERF] Submitting form data:', data);
         }
-        const resp = await fetch('/time-entries', {
-            method: 'POST',
+        
+        // Determine endpoint and method based on mode
+        let url, method;
+        if (mode === 'edit' && editId) {
+            url = `/time-entries/${editId}`;
+            method = 'PUT';
+        } else {
+            // 'duplicate' or normal create
+            url = '/time-entries';
+            method = 'POST';
+        }
+        
+        const resp = await fetch(url, {
+            method: method,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
         });
@@ -643,10 +691,20 @@ form.addEventListener('submit', async (e) => {
             window.console.log('[PERF] POST /time-entries finished. Duration:', (t2 - t1).toFixed(1), 'ms');
         }
         if (resp.ok) {
+            const successMsg = mode === 'edit' ? 'Záznam bol úspešne upravený!' : 'Záznam bol úspešne uložený!';
             alertBox.className = 'alert alert-success';
-            alertBox.textContent = 'Záznam bol úspešne uložený!';
+            alertBox.textContent = successMsg;
             alertBox.style.display = 'block';
             setTimeout(() => { alertBox.style.display = 'none'; }, 4000);
+            
+            // Clear edit/duplicate mode and reset button text and color
+            form.removeAttribute('data-mode');
+            form.removeAttribute('data-edit-id');
+            document.getElementById('cancelEditBtn').style.display = 'none';
+            const submitBtn = document.getElementById('submitBtn');
+            submitBtn.textContent = 'Vytvoriť záznam';
+            submitBtn.className = 'btn btn-success';
+            
             form.reset();
             form.autor.value = topAutorInput.value;
             setTodayDate(form.datum);
@@ -705,6 +763,27 @@ form.addEventListener('reset', function() {
     form.minuty.value = '0';
     autoExpandTextarea(document.getElementById('popis'));
     updateCounter('popis', 'popisCounter');
+    
+    // Clear edit/duplicate mode on reset and reset button text and color
+    form.removeAttribute('data-mode');
+    form.removeAttribute('data-edit-id');
+    document.getElementById('cancelEditBtn').style.display = 'none';
+    const submitBtn = document.getElementById('submitBtn');
+    submitBtn.textContent = 'Vytvoriť záznam';
+    submitBtn.className = 'btn btn-success';
+});
+
+// Cancel edit/duplicate button
+document.getElementById('cancelEditBtn').addEventListener('click', function() {
+    form.reset();
+    form.autor.value = topAutorInput.value;
+    setTodayDate(form.datum);
+    form.removeAttribute('data-mode');
+    form.removeAttribute('data-edit-id');
+    document.getElementById('cancelEditBtn').style.display = 'none';
+    const submitBtn = document.getElementById('submitBtn');
+    submitBtn.textContent = 'Vytvoriť záznam';
+    submitBtn.className = 'btn btn-success';
 });
 
 document.getElementById('exportExcelBtn').addEventListener('click', function() {
@@ -1076,78 +1155,16 @@ async function fetchMetaAppTasks(author) {
 
 async function fetchJiraIssues(author) {
     if (!author) {
-        console.log('[JIRA Cache] No author provided, skipping fetch.');
+        console.log('[JIRA] No author provided, skipping fetch.');
         return [];
     }
-    // Try to load from localStorage first
-    const cacheKey = `jiraIssuesCache_${author}`;
-    const cacheStr = localStorage.getItem(cacheKey);
-    
-    // Check in-memory cache first
-    if (jiraIssuesLoadedFor === author && jiraIssuesCache.length) {
-        console.log('[JIRA Cache] Using in-memory cache:', {
-            author,
-            issueCount: jiraIssuesCache.length,
-            source: 'memory-cache'
-        });
-        return jiraIssuesCache;
-    }
-    
-    // Try localStorage cache
-    if (cacheStr) {
-        try {
-            const cacheObj = JSON.parse(cacheStr);
-            const cacheAge = Date.now() - (cacheObj?.ts || 0);
-            const cacheAgeHours = Math.round(cacheAge / (60*60*1000) * 10) / 10;
-            const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
 
-            const hasParentMetadata = Array.isArray(cacheObj?.data)
-                ? cacheObj.data.every(issue =>
-                    Object.prototype.hasOwnProperty.call(issue, 'parent_key') &&
-                    Object.prototype.hasOwnProperty.call(issue, 'parent_summary')
-                )
-                : false;
-
-            if (cacheObj && Array.isArray(cacheObj.data) && cacheObj.ts && cacheAge < CACHE_DURATION && hasParentMetadata) {
-                jiraIssuesCache = cacheObj.data;
-                jiraIssuesLoadedFor = author;
-                jiraLoading = false;
-                jiraError = null;
-                console.log('[JIRA Cache] Using localStorage cache:', {
-                    author,
-                    issueCount: cacheObj.data.length,
-                    cacheAge: Math.round(cacheAge / (60 * 1000)) + ' minutes',
-                    source: 'local-storage'
-                });
-                return jiraIssuesCache;
-            }
-
-            const reason = !hasParentMetadata ? 'missing parent metadata' : 'age > 30 minutes';
-            console.log('[JIRA Cache] Cache invalid:', {
-                author,
-                cacheAge: cacheAgeHours + ' hours',
-                reason,
-                source: 'cache-invalidated'
-            });
-            localStorage.removeItem(cacheKey);
-        } catch (e) {
-            console.log('[JIRA Cache] Failed to parse localStorage cache:', {
-                author,
-                error: e.message,
-                source: 'parse-error'
-            });
-            localStorage.removeItem(cacheKey);
-        }
-    }
     jiraLoading = true;
     jiraError = null;
 
-    // Fetch from API
+    // Always fetch fresh - no cache
     const fetchStart = performance.now();
-    console.log('[JIRA Cache] Cache miss, fetching from API:', {
-        author,
-        source: 'api-request'
-    });
+    console.log('[JIRA] Fetching fresh data from API (no cache):', { author });
 
     try {
         const resp = await fetch(`/jira-issues?autor=${encodeURIComponent(author)}`);
@@ -1155,30 +1172,17 @@ async function fetchJiraIssues(author) {
         const data = await resp.json();
         const fetchDuration = performance.now() - fetchStart;
 
-        // Update cache
+        // Update in-memory state
         jiraIssuesCache = data;
         jiraIssuesLoadedFor = author;
         jiraLoading = false;
         
-        console.log('[JIRA Cache] Successfully fetched from API:', {
+        console.log('[JIRA] Successfully fetched from API:', {
             author,
             issueCount: data.length,
             duration: Math.round(fetchDuration) + 'ms',
-            source: 'api-success',
-            sampleIssue: data[0], // Show first issue structure
-            hasParentKeys: data.filter(i => i.parent_key).length + ' issues with parent_key'
+            sampleIssues: data.slice(0, 3)  // Show first 3 issues
         });
-
-        // Save to localStorage with timestamp
-        try {
-            localStorage.setItem(cacheKey, JSON.stringify({ data, ts: Date.now() }));
-            console.log('[JIRA Cache] Updated localStorage cache');
-        } catch (e) {
-            console.warn('[JIRA Cache] Failed to update localStorage:', {
-                error: e.message,
-                source: 'storage-error'
-            });
-        }
         
         return data;
     } catch (err) {
@@ -1186,10 +1190,9 @@ async function fetchJiraIssues(author) {
         jiraIssuesCache = [];
         jiraLoading = false;
         
-        console.error('[JIRA Cache] API fetch failed:', {
+        console.error('[JIRA] API fetch failed:', {
             author,
-            error: jiraError,
-            source: 'api-error'
+            error: jiraError
         });
         
         return [];
@@ -1718,8 +1721,24 @@ style.innerHTML = `
 `;
 document.head.appendChild(style);
 window.addEventListener('DOMContentLoaded', async () => {
-    // Set autor field to topAutorInput value on page load
-    form.autor.value = topAutorInput.value;
+    // Fetch config and set default author if available
+    try {
+        const configResponse = await fetch('/api/config');
+        if (configResponse.ok) {
+            const config = await configResponse.json();
+            if (config.defaultAuthor) {
+                topAutorInput.value = config.defaultAuthor;
+                form.autor.value = config.defaultAuthor;
+            }
+        }
+    } catch (error) {
+        console.warn('Could not fetch config:', error);
+    }
+
+    // Set autor field to topAutorInput value on page load (fallback if not set from config)
+    if (!form.autor.value) {
+        form.autor.value = topAutorInput.value;
+    }
     form.jira.removeAttribute('readonly'); // Allow typing by default
     form.hodiny.value = '0'; // Default Hodiny to 0
     form.minuty.value = '0'; // Default Minuty to 0

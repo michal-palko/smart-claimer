@@ -94,72 +94,68 @@ def get_current_and_prior_sprints(board_id):
     prior = closed[-1] if closed else None
     return current, prior
 
-# JIRA API: Search issues assigned to a user (author) - for dropdown autocomplete
+# JIRA API: Fast search for issues in active sprint - for dropdown autocomplete
 def fetch_jira_issues_for_author(autor: str) -> List[dict]:
     """
-    Fetch JIRA issues assigned to the specified author.
-    Tries the modern search API first for full fidelity, then falls back
-    to the issue picker and GraphQL as needed.
+    Fast fetch of JIRA issues for current sprint only.
+    Returns basic info (key + summary) without parent lookups for speed.
+    Uses issue picker endpoint (search API is deprecated with 410 error).
     """
-    fetch_jira_issues_for_author.last_meta = {
-        "source": None,
-        "limit": None,
-        "requested": None,
-        "returned": 0,
-        "reported_total": None,
-        "note": None,
+    print(f"[JIRA Fetch] Fetching issues for {autor} from current sprint (no cache, no parent lookup)")
+    
+    # Simple JQL: assignee in active/future sprints
+    jql = f'assignee = "{autor}" AND sprint in openSprints() ORDER BY updated DESC'
+    
+    url = f"{JIRA_URL}/rest/api/3/issue/picker"
+    headers = get_jira_headers()
+    params = {
+        "query": "",  # Empty query with JQL works
+        "currentJQL": jql,
+        "maxResults": 100,
+        "showSubTasks": "true"
     }
-    errors = []
-
+    
     try:
-        search_issues = _fetch_jira_with_new_search_api(autor)
-        if search_issues:
-            meta = getattr(_fetch_jira_with_new_search_api, "last_meta", {})
-            fetch_jira_issues_for_author.last_meta.update(meta)
-            print(
-                f"[JIRA Fetch] search_api returned {len(search_issues)} issues "
-                f"(requested={meta.get('requested')}, limit={meta.get('limit')}, total={meta.get('reported_total')})"
-            )
-            return search_issues
-        print("[JIRA Fetch] search_api returned no issues, continuing with fallbacks")
-    except Exception as exc:
-        print(f"[JIRA Fetch] search_api failed: {exc}")
-        errors.append(("search_api", str(exc)))
-
-    try:
-        picker_issues = _fetch_jira_with_issue_picker(autor)
-        if picker_issues:
-            meta = getattr(_fetch_jira_with_issue_picker, "last_meta", {})
-            fetch_jira_issues_for_author.last_meta.update(meta)
-            print(
-                f"[JIRA Fetch] issue_picker returned {len(picker_issues)} issues "
-                f"(requested={meta.get('requested')}, limit={meta.get('limit')}, total={meta.get('reported_total')})"
-            )
-            return picker_issues
-    except Exception as exc:
-        print(f"[JIRA Fetch] issue_picker failed: {exc}")
-        errors.append(("issue_picker", str(exc)))
-
-    try:
-        graphql_issues = _fetch_jira_with_graphql(autor)
-        if graphql_issues:
-            meta = getattr(_fetch_jira_with_graphql, "last_meta", {})
-            fetch_jira_issues_for_author.last_meta.update(meta)
-            print(
-                f"[JIRA Fetch] graphql returned {len(graphql_issues)} issues "
-                f"(requested={meta.get('requested')}, limit={meta.get('limit')}, total={meta.get('reported_total')})"
-            )
-            return graphql_issues
-    except Exception as exc:
-        print(f"[JIRA Fetch] graphql failed: {exc}")
-        errors.append(("graphql", str(exc)))
-
-    print("[JIRA Fetch] No issues returned by any method.")
-    if errors:
-        for name, err in errors:
-            print(f"  - {name} error: {err}")
-        fetch_jira_issues_for_author.last_meta["note"] = "all fetchers failed or returned empty"
-    return []
+        resp = requests.get(url, headers=headers, params=params)
+        resp.raise_for_status()
+        
+        result = resp.json()
+        sections = result.get("sections", [])
+        
+        # Collect issues from all sections
+        issues = []
+        for section in sections:
+            section_issues = section.get("issues", [])
+            for issue in section_issues:
+                key = issue.get("key", "")
+                summary = issue.get("summaryText") or issue.get("summary", "")
+                if key and summary:
+                    issues.append({
+                        "key": key,
+                        "summary": summary
+                    })
+        
+        print(f"[JIRA Fetch] Found {len(issues)} issues from {len(sections)} sections")
+        
+        # Set metadata for endpoint headers
+        fetch_jira_issues_for_author.last_meta = {
+            "source": "issue_picker",
+            "limit": params["maxResults"],
+            "requested": params["maxResults"],
+            "returned": len(issues),
+            "reported_total": len(issues),
+            "note": "fast_mode_current_sprint_only"
+        }
+        
+        return issues
+        
+    except Exception as e:
+        print(f"[JIRA Fetch] Failed: {e}")
+        fetch_jira_issues_for_author.last_meta = {
+            "source": "issue_picker",
+            "note": f"error: {str(e)}"
+        }
+        return []
 
 def _fetch_jira_with_issue_picker(autor: str) -> List[dict]:
     """

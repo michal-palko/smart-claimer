@@ -68,7 +68,8 @@ def get_config():
             "maxTokens": int(os.getenv("OPENAI_MAX_TOKENS", "500")),
             "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
             "defaultPrompt": openai_prompt
-        }
+        },
+        "defaultAuthor": os.getenv("DEFAULT_AUTHOR", "")
     }
 
 # Enable CORS for frontend
