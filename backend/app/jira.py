@@ -27,8 +27,38 @@ def get_jira_headers():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-# Helper to fetch epic color by key (with simple in-memory cache)
-@lru_cache(maxsize=128)
+def get_enhanced_jql_query(autor: str = None, for_current_user: bool = False) -> str:
+    """
+    Generate enhanced JQL query for both active sprints and recent updates.
+    
+    Args:
+        autor: Specific user email to filter by (when not using currentUser())
+        for_current_user: If True, uses currentUser(), else uses autor parameter
+    
+    Returns:
+        JQL query string combining active sprints and recent updates
+    """
+    if for_current_user:
+        assignee_clause = "assignee = currentUser() AND "
+    elif autor:
+        assignee_clause = f"assignee = '{autor}' AND "
+    else:
+        assignee_clause = ""
+    
+    # Enhanced query: Active sprint items + future sprint items + backlog items in sprints + recent updates
+    return (
+        f"{assignee_clause}("
+        "sprint in openSprints() OR "                           # Issues in active/open sprints
+        "sprint in futureSprints() OR "                         # Issues in future sprints
+        "(status = 'Backlog' AND sprint in openSprints()) OR "  # Backlog items in active sprints
+        "(status = 'Backlog' AND sprint in futureSprints()) OR " # Backlog items in future sprints
+        "(summary ~ \"Review\" AND statusCategory != Done) OR "  # Review items sitting in backlog
+        "updated >= -7d"                                        # Recently updated items
+        ") "
+        "ORDER BY updated DESC"
+    )
+
+# Helper to fetch epic color by key (no caching for fresh data)
 def fetch_epic_color(epic_key: str) -> Optional[str]:
     if not epic_key:
         return None
@@ -67,41 +97,90 @@ def get_current_and_prior_sprints(board_id):
 # JIRA API: Search issues assigned to a user (author) - for dropdown autocomplete
 def fetch_jira_issues_for_author(autor: str) -> List[dict]:
     """
-    Fetch JIRA issues using the working issue picker endpoint.
-    This replaces the deprecated search APIs (v2/v3) which return HTTP 410.
+    Fetch JIRA issues assigned to the specified author.
+    Tries the modern search API first for full fidelity, then falls back
+    to the issue picker and GraphQL as needed.
     """
-    
-    # Primary approach: Use issue picker endpoint (proven to work)
+    fetch_jira_issues_for_author.last_meta = {
+        "source": None,
+        "limit": None,
+        "requested": None,
+        "returned": 0,
+        "reported_total": None,
+        "note": None,
+    }
+    errors = []
+
     try:
-        return _fetch_jira_with_issue_picker(autor)
-    except Exception as e1:
-        print(f"Issue picker API failed: {e1}")
-        
-        # Fallback 1: Try GraphQL if available
-        try:
-            return _fetch_jira_with_graphql(autor)
-        except Exception as e2:
-            print(f"GraphQL API failed: {e2}")
-            
-            # Fallback 2: Return empty list with informative message
-            print("All primary JIRA API methods failed.")
-            print("Issue picker and GraphQL endpoints not available.")
-            return []
+        search_issues = _fetch_jira_with_new_search_api(autor)
+        if search_issues:
+            meta = getattr(_fetch_jira_with_new_search_api, "last_meta", {})
+            fetch_jira_issues_for_author.last_meta.update(meta)
+            print(
+                f"[JIRA Fetch] search_api returned {len(search_issues)} issues "
+                f"(requested={meta.get('requested')}, limit={meta.get('limit')}, total={meta.get('reported_total')})"
+            )
+            return search_issues
+        print("[JIRA Fetch] search_api returned no issues, continuing with fallbacks")
+    except Exception as exc:
+        print(f"[JIRA Fetch] search_api failed: {exc}")
+        errors.append(("search_api", str(exc)))
+
+    try:
+        picker_issues = _fetch_jira_with_issue_picker(autor)
+        if picker_issues:
+            meta = getattr(_fetch_jira_with_issue_picker, "last_meta", {})
+            fetch_jira_issues_for_author.last_meta.update(meta)
+            print(
+                f"[JIRA Fetch] issue_picker returned {len(picker_issues)} issues "
+                f"(requested={meta.get('requested')}, limit={meta.get('limit')}, total={meta.get('reported_total')})"
+            )
+            return picker_issues
+    except Exception as exc:
+        print(f"[JIRA Fetch] issue_picker failed: {exc}")
+        errors.append(("issue_picker", str(exc)))
+
+    try:
+        graphql_issues = _fetch_jira_with_graphql(autor)
+        if graphql_issues:
+            meta = getattr(_fetch_jira_with_graphql, "last_meta", {})
+            fetch_jira_issues_for_author.last_meta.update(meta)
+            print(
+                f"[JIRA Fetch] graphql returned {len(graphql_issues)} issues "
+                f"(requested={meta.get('requested')}, limit={meta.get('limit')}, total={meta.get('reported_total')})"
+            )
+            return graphql_issues
+    except Exception as exc:
+        print(f"[JIRA Fetch] graphql failed: {exc}")
+        errors.append(("graphql", str(exc)))
+
+    print("[JIRA Fetch] No issues returned by any method.")
+    if errors:
+        for name, err in errors:
+            print(f"  - {name} error: {err}")
+        fetch_jira_issues_for_author.last_meta["note"] = "all fetchers failed or returned empty"
+    return []
 
 def _fetch_jira_with_issue_picker(autor: str) -> List[dict]:
     """
     Use the working JIRA issue picker endpoint.
     This endpoint works even when search APIs are deprecated.
-    Enhanced to fetch parent information for each issue.
+    Returns basic issue information without parent details for better performance.
+    
+    Query strategy: Get issues from active sprints OR recently updated (last 3 days)
     """
     url = f"{JIRA_URL}/rest/api/3/issue/picker"
     headers = get_jira_headers()
     
+    # Enhanced JQL: Active sprints OR recent updates (last 3 days) for specific user
+    # This gives a comprehensive view of current work assigned to the user
+    enhanced_jql = get_enhanced_jql_query(autor=autor, for_current_user=False)
+    
     # Parameters that work based on our testing
     params = {
         "query": "",  # Empty query works better than searching by user
-        "currentJQL": "updated >= -30d ORDER BY updated DESC",  # Recent issues
-        "maxResults": 100,
+        "currentJQL": enhanced_jql,
+        "maxResults": 150,  # Increased to account for more comprehensive query
         "showSubTasks": "true"
     }
     
@@ -131,45 +210,56 @@ def _fetch_jira_with_issue_picker(autor: str) -> List[dict]:
     
     if not issue_keys:
         print("No issues found in issue picker")
+        _fetch_jira_with_issue_picker.last_meta = {
+            "source": "issue_picker",
+            "limit": params.get("maxResults"),
+            "requested": params.get("maxResults"),
+            "returned": 0,
+            "reported_total": 0,
+            "note": f"sections={len(sections)}"
+        }
         return []
+
+    print(f"Issue picker found {len(issue_keys)} issues - returning basic info for performance")
+    print(f"Issue keys found: {issue_keys}")
     
-    print(f"Issue picker found {len(issue_keys)} issues, fetching parent details...")
+    # Check if CARTV-60 is in the results
+    if "CARTV-60" in issue_keys:
+        print("✓ CARTV-60 found in issue picker results")
+    else:
+        print("✗ CARTV-60 NOT found in issue picker results")
+        print(f"JQL used: {enhanced_jql}")
     
-    # Now fetch detailed information for each issue including parent
+    # Return basic issue information without parent details for better performance
     enhanced_issues = []
     
-    # Batch process to avoid too many individual calls
-    for i, issue_key in enumerate(issue_keys):
-        try:
-            issue_details = _fetch_issue_details(issue_key, headers)
-            if issue_details:
-                issue_details["summary"] = issue_summaries[issue_key]  # Use picker summary
-                enhanced_issues.append(issue_details)
-                
-            # Progress indicator for large sets
-            if i > 0 and i % 20 == 0:
-                print(f"Processed {i}/{len(issue_keys)} issues...")
-                
-        except Exception as e:
-            # Don't fail entire process if one issue fails
-            print(f"Failed to fetch details for {issue_key}: {e}")
-            # Add basic issue info without parent
-            enhanced_issues.append({
-                "key": issue_key,
-                "summary": issue_summaries[issue_key],
-                "parent_key": None,
-                "parent_summary": None,
-                "parent_color": None,
-                "sprint_name": None
-            })
+    for issue_key in issue_keys:
+        enhanced_issues.append({
+            "key": issue_key,
+            "summary": issue_summaries[issue_key],
+            "parent_key": None,
+            "parent_summary": None,
+            "parent_color": None,
+            "sprint_name": None
+        })
     
-    print(f"Enhanced {len(enhanced_issues)} issues with parent information")
-    return enhanced_issues[:100]  # Limit to 100 issues
+    print(f"Returned {len(enhanced_issues)} issues without parent information for faster loading")
+    meta = {
+        "source": "issue_picker",
+        "limit": params.get("maxResults"),
+        "requested": params.get("maxResults"),
+        "returned": len(enhanced_issues),
+        "reported_total": result.get("total") or len(issue_keys),
+        "note": f"sections={len(sections)}"
+    }
+    _fetch_jira_with_issue_picker.last_meta = meta
+    return enhanced_issues
 
 def _fetch_issue_details(issue_key: str, headers: dict) -> Optional[Dict[str, Any]]:
     """
     Fetch detailed information for a single issue including parent data.
     """
+    print(f"[DEBUG] _fetch_issue_details called for {issue_key}")
     url = f"{JIRA_URL}/rest/api/3/issue/{issue_key}"
     
     # Request specific fields we need
@@ -194,6 +284,11 @@ def _fetch_issue_details(issue_key: str, headers: dict) -> Optional[Dict[str, An
         "parent_color": None,
         "sprint_name": None
     }
+    
+    # Get the issue summary first
+    issue_summary = fields.get('summary', '') or ""
+    result["summary"] = issue_summary
+    print(f"[DEBUG] _fetch_issue_details for {issue_key}: summary='{issue_summary}'")
     
     # Extract parent information
     parent = fields.get('parent')
@@ -222,18 +317,20 @@ def _fetch_issue_details(issue_key: str, headers: dict) -> Optional[Dict[str, An
                 result["parent_key"] = epic_link.get('key')
                 result["parent_summary"] = epic_link.get('summary', '')
     
-    # Special handling for Review issues - use grandparent instead of parent
+    # Special handling for Review issues - use grandparent as uloha
     issue_summary = fields.get('summary', '') or ""
     if issue_summary.lower().startswith('review') and result["parent_key"]:
         try:
-            # Fetch the parent's parent (grandparent)
+            # For Review issues, fetch the parent of parent (grandparent)
             grandparent_info = _fetch_grandparent_info(result["parent_key"], headers)
             if grandparent_info:
                 # Replace parent with grandparent for Review issues
                 result["parent_key"] = grandparent_info["key"]
                 result["parent_summary"] = grandparent_info["summary"]
                 result["parent_color"] = grandparent_info["color"]
-                print(f"Review issue {issue_key}: Using grandparent {grandparent_info['key']}")
+                print(f"Review issue {issue_key}: Using grandparent {grandparent_info['key']} as uloha")
+            else:
+                print(f"Review issue {issue_key}: No grandparent found, keeping original parent")
         except Exception as e:
             print(f"Failed to fetch grandparent for review issue {issue_key}: {e}")
             # Keep original parent if grandparent fetch fails
@@ -319,18 +416,27 @@ def _fetch_jira_with_new_search_api(autor: str) -> List[dict]:
     
     # Use POST with JSON body as per modern JIRA Cloud requirements
     data = {
-        "jql": f"assignee = '{autor}' AND updated >= -30d ORDER BY updated DESC",
-        "fields": ["key", "summary", "parent", "customfield_10020"],
-        "maxResults": 100,
-        "expand": ["names", "schema"],
-        "validateQuery": "strict"
+        "jql": get_enhanced_jql_query(autor=autor, for_current_user=False),
+        "fields": ["key", "summary", "parent", "customfield_10020", "customfield_10014", "customfield_10016"],
+        "maxResults": 200,
+        "validateQuery": False
     }
     
     resp = requests.post(url, headers=headers, json=data)
     resp.raise_for_status()
     
     result = resp.json()
-    return _convert_standard_jira_response(result)
+    issues = _convert_standard_jira_response(result)
+    meta = {
+        "source": "search_api",
+        "limit": data.get("maxResults"),
+        "requested": data.get("maxResults"),
+        "returned": len(issues),
+        "reported_total": result.get("total"),
+        "note": f"startAt={result.get('startAt', 0)}"
+    }
+    _fetch_jira_with_new_search_api.last_meta = meta
+    return issues
 
 def _fetch_jira_with_post_search(autor: str) -> List[dict]:
     """Try POST method with the v2 endpoint"""
@@ -472,7 +578,7 @@ def _fetch_jira_with_graphql(autor: str) -> List[dict]:
         "variables": {
             "cloudId": cloud_id,
             "searchInput": {
-                "jql": f"assignee = currentUser() ORDER BY updated DESC"
+                "jql": get_enhanced_jql_query(for_current_user=True)
             }
         },
         "operationName": "SearchJiraIssues"
@@ -510,6 +616,15 @@ def _fetch_jira_with_graphql(autor: str) -> List[dict]:
             })
     
     print(f"GraphQL found {len(issues)} issues")
+    meta = {
+        "source": "graphql",
+        "limit": None,
+        "requested": None,
+        "returned": len(issues),
+        "reported_total": issue_search.get('totalCount'),
+        "note": f"edges={len(edges)}"
+    }
+    _fetch_jira_with_graphql.last_meta = meta
     return issues
 
 def _fetch_jira_with_gateway_api(autor: str) -> List[dict]:
@@ -629,8 +744,6 @@ def _convert_standard_jira_response(result) -> List[dict]:
             "sprint_name": sprint_name
         })
     
-    # Sort alphabetically by key
-    parsed_issues.sort(key=lambda x: x["key"])
     return parsed_issues
 
 def _extract_issues_from_activities(activities) -> List[dict]:
@@ -802,34 +915,37 @@ def fetch_jira_issue_by_key(issue_key: str) -> Optional[dict]:
     if not issue_key:
         return None
     
-    jql = f"key = '{issue_key}'"
-    url = f"{JIRA_URL}/rest/api/2/search"
+    # Use direct issue endpoint instead of deprecated search API
+    url = f"{JIRA_URL}/rest/api/3/issue/{issue_key}"
     headers = get_jira_headers()
-    params = {
-        "jql": jql,
-        "fields": "key,summary,parent,customfield_10020",  # customfield_10020: Sprint
-        "maxResults": 1
-    }
+    params = {"fields": "key,summary,parent,customfield_10020"}  # customfield_10020: Sprint
     
     try:
         resp = requests.get(url, headers=headers, params=params)
-        resp.raise_for_status()
-        issues = resp.json().get("issues", [])
         
-        if not issues:
+        if resp.status_code == 404:
+            print(f"JIRA issue {issue_key} not found")
             return None
-            
-        issue = issues[0]
-        key = issue["key"]
-        summary = issue["fields"].get("summary", "")
-        parent = issue["fields"].get("parent")
-        parent_key = parent["key"] if parent else None
-        parent_summary = parent["fields"].get("summary") if parent and parent.get("fields") else None
+        elif not resp.ok:
+            print(f"JIRA API error for {issue_key}: {resp.status_code}")
+            return None
+        
+        issue_data = resp.json()
+        fields = issue_data.get("fields", {})
+        
+        key = issue_key
+        summary = fields.get("summary", "")
+        parent = fields.get("parent")
+        parent_key = parent.get("key") if parent else None
+        parent_summary = parent.get("fields", {}).get("summary") if parent and parent.get("fields") else None
         parent_color = None
         
-        # If issue is 'Review - ...', get parent of parent as parent
+        print(f"[JIRA Validation] Found {key}: '{summary}'")
+        
+        # If issue is 'Review - ...', get grandparent as uloha  
         if summary.strip().startswith("Review -") and parent_key:
-            # Fetch parent issue to get its parent
+            print(f"[JIRA Validation] Review issue detected, looking for grandparent")
+            # Fetch parent issue to get its parent (grandparent)
             parent_url = f"{JIRA_URL}/rest/api/3/issue/{parent_key}"
             parent_resp = requests.get(parent_url, headers=headers)
             if parent_resp.ok:
@@ -838,12 +954,33 @@ def fetch_jira_issue_by_key(issue_key: str) -> Optional[dict]:
                 if grandparent:
                     parent_key = grandparent.get("key")
                     parent_summary = grandparent.get("fields", {}).get("summary")
+                    print(f"[JIRA Validation] Using direct grandparent {parent_key} as uloha")
+                else:
+                    # No direct grandparent, check Epic Link
+                    print(f"[JIRA Validation] No direct grandparent, checking Epic Link")
+                    epic_link = parent_fields.get('customfield_10014') or parent_fields.get('customfield_10016')
+                    if epic_link:
+                        if isinstance(epic_link, str):
+                            parent_key = epic_link
+                            parent_summary = ""
+                        elif isinstance(epic_link, dict):
+                            parent_key = epic_link.get('key')
+                            parent_summary = epic_link.get('summary', '')
+                        print(f"[JIRA Validation] Using Epic Link {parent_key} as grandparent")
+                    else:
+                        print(f"[JIRA Validation] No grandparent or Epic Link found, using NO EPIC ASSIGNED")
+                        parent_key = "NO_EPIC_ASSIGNED"
+                        parent_summary = "NO EPIC ASSIGNED"
+            else:
+                print(f"[JIRA Validation] Could not fetch parent {parent_key}")
+                parent_key = "NO_EPIC_ASSIGNED"
+                parent_summary = "NO EPIC ASSIGNED"
         
-        if parent_key:
+        if parent_key and parent_key != "NO_EPIC_ASSIGNED":
             parent_color = fetch_epic_color(parent_key)
         
         # Sprint info
-        sprint_field = issue["fields"].get("customfield_10020")
+        sprint_field = fields.get("customfield_10020")
         sprint_name = None
         if sprint_field:
             if isinstance(sprint_field, list) and sprint_field:
@@ -876,6 +1013,162 @@ def clean_text(text):
     text = " ".join(text.split())
     return text
 
+def process_adf_node(node):
+    """Process a single ADF node and return HTML or raw markdown for unsupported elements."""
+    if not isinstance(node, dict):
+        return clean_text(str(node))
+    
+    node_type = node.get("type", "")
+    content = node.get("content", [])
+    attrs = node.get("attrs", {})
+    
+    # Handle text nodes with marks (bold, italic, etc.)
+    if node_type == "text":
+        text = clean_text(node.get("text", ""))
+        marks = node.get("marks", [])
+        
+        for mark in marks:
+            mark_type = mark.get("type", "")
+            if mark_type == "strong":
+                text = f"<strong>{text}</strong>"
+            elif mark_type == "em":
+                text = f"<em>{text}</em>"
+            elif mark_type == "code":
+                text = f"<code>{text}</code>"
+            elif mark_type == "link":
+                href = mark.get("attrs", {}).get("href", "#")
+                text = f'<a href="{href}" target="_blank">{text}</a>'
+            else:
+                # Unsupported mark - show as raw
+                text = f"{text} [mark:{mark_type}]"
+        
+        return text
+    
+    # Handle paragraph nodes
+    elif node_type == "paragraph":
+        paragraph_content = []
+        for child in content:
+            paragraph_content.append(process_adf_node(child))
+        text = "".join(paragraph_content).strip()
+        return f"<p>{text}</p>" if text else ""
+    
+    # Handle lists
+    elif node_type == "bulletList":
+        list_items = []
+        for item in content:
+            if item.get("type") == "listItem":
+                item_content = []
+                for child in item.get("content", []):
+                    item_content.append(process_adf_node(child))
+                item_text = "".join(item_content).strip()
+                if item_text:
+                    # Remove <p> tags from list items for cleaner display
+                    item_text = item_text.replace("<p>", "").replace("</p>", "")
+                    list_items.append(f"<li>{item_text}</li>")
+        return "<ul>" + "".join(list_items) + "</ul>" if list_items else ""
+    
+    elif node_type == "orderedList":
+        list_items = []
+        for item in content:
+            if item.get("type") == "listItem":
+                item_content = []
+                for child in item.get("content", []):
+                    item_content.append(process_adf_node(child))
+                item_text = "".join(item_content).strip()
+                if item_text:
+                    # Remove <p> tags from list items for cleaner display
+                    item_text = item_text.replace("<p>", "").replace("</p>", "")
+                    list_items.append(f"<li>{item_text}</li>")
+        return "<ol>" + "".join(list_items) + "</ol>" if list_items else ""
+    
+    # Handle code blocks
+    elif node_type == "codeBlock":
+        language = attrs.get("language", "")
+        code_text = []
+        for child in content:
+            if child.get("type") == "text":
+                code_text.append(child.get("text", ""))
+        code = "".join(code_text)
+        return f'<pre><code class="language-{language}">{clean_text(code)}</code></pre>'
+    
+    # Handle headings
+    elif node_type == "heading":
+        level = attrs.get("level", 1)
+        heading_content = []
+        for child in content:
+            heading_content.append(process_adf_node(child))
+        text = "".join(heading_content).strip()
+        return f"<h{level}>{text}</h{level}>" if text else ""
+    
+    # Handle emojis
+    elif node_type == "emoji":
+        shortName = attrs.get("shortName", "")
+        text = attrs.get("text", "")
+        if text:
+            return text  # Use the actual emoji character if available
+        elif shortName:
+            return f":{shortName}:"  # Fallback to :emoji_name: format
+        else:
+            return "[emoji]"
+    
+    # Handle mentions
+    elif node_type == "mention":
+        display_name = attrs.get("text", attrs.get("displayName", ""))
+        user_id = attrs.get("id", "")
+        if display_name:
+            return f"@{display_name}"
+        elif user_id:
+            return f"@{user_id}"
+        else:
+            return "@[user]"
+    
+    # Handle tables (basic support)
+    elif node_type == "table":
+        table_rows = []
+        for row in content:
+            if row.get("type") == "tableRow":
+                cells = []
+                for cell in row.get("content", []):
+                    if cell.get("type") in ["tableCell", "tableHeader"]:
+                        cell_content = []
+                        for child in cell.get("content", []):
+                            cell_content.append(process_adf_node(child))
+                        cell_text = "".join(cell_content).strip()
+                        tag = "th" if cell.get("type") == "tableHeader" else "td"
+                        cells.append(f"<{tag}>{cell_text}</{tag}>")
+                if cells:
+                    table_rows.append("<tr>" + "".join(cells) + "</tr>")
+        return "<table>" + "".join(table_rows) + "</table>" if table_rows else ""
+    
+    # Handle hard breaks
+    elif node_type == "hardBreak":
+        return "<br/>"
+    
+    # Handle rules (horizontal lines)
+    elif node_type == "rule":
+        return "<hr/>"
+    
+    # For unsupported node types, show raw markdown
+    else:
+        # Try to extract text content if available
+        if content:
+            child_content = []
+            for child in content:
+                child_content.append(process_adf_node(child))
+            text = "".join(child_content).strip()
+            if text:
+                return f"[{node_type}: {text}]"
+        
+        # Show node type and attributes as raw markdown
+        attrs_str = ""
+        if attrs:
+            attr_parts = []
+            for key, value in attrs.items():
+                attr_parts.append(f"{key}={value}")
+            attrs_str = f" ({', '.join(attr_parts)})" if attr_parts else ""
+        
+        return f"[{node_type}{attrs_str}]"
+
 def process_jira_body(body):
     """Process a Jira comment/description body that can be either HTML, plain text, or ADF format."""
     if not body:
@@ -886,47 +1179,14 @@ def process_jira_body(body):
         try:
             result = []
             for content in body.get("content", []):
-                if content["type"] == "paragraph":
-                    paragraph_text = []
-                    for text in content.get("content", []):
-                        if text["type"] == "text":
-                            paragraph_text.append(clean_text(text.get("text", "")))
-                    cleaned_text = "".join(paragraph_text).strip()
-                    if cleaned_text:  # Only add non-empty paragraphs
-                        result.append(f"<p>{cleaned_text}</p>")
-                elif content["type"] == "bulletList":
-                    list_items = []
-                    for item in content.get("content", []):
-                        if item["type"] == "listItem":
-                            item_text = []
-                            for paragraph in item.get("content", []):
-                                if paragraph["type"] == "paragraph":
-                                    for text in paragraph.get("content", []):
-                                        if text["type"] == "text":
-                                            item_text.append(clean_text(text.get("text", "")))
-                            cleaned_text = "".join(item_text).strip()
-                            if cleaned_text:  # Only add non-empty items
-                                list_items.append(f"<li>{cleaned_text}</li>")
-                    if list_items:
-                        result.append("<ul>" + "".join(list_items) + "</ul>")
-                elif content["type"] == "orderedList":
-                    list_items = []
-                    for item in content.get("content", []):
-                        if item["type"] == "listItem":
-                            item_text = []
-                            for paragraph in item.get("content", []):
-                                if paragraph["type"] == "paragraph":
-                                    for text in paragraph.get("content", []):
-                                        if text["type"] == "text":
-                                            item_text.append(clean_text(text.get("text", "")))
-                            cleaned_text = "".join(item_text).strip()
-                            if cleaned_text:  # Only add non-empty items
-                                list_items.append(f"<li>{cleaned_text}</li>")
-                    if list_items:
-                        result.append("<ol>" + "".join(list_items) + "</ol>")
+                processed = process_adf_node(content)
+                if processed:
+                    result.append(processed)
             return "".join(result)
-        except (KeyError, TypeError):
-            return clean_text(str(body))  # Fallback if we can't parse the structure
+        except (KeyError, TypeError, Exception) as e:
+            # If parsing fails completely, show raw JSON
+            import json
+            return f'<pre><code>[ADF Parse Error: {str(e)}]\n{json.dumps(body, indent=2)}</code></pre>'
     else:
         # For HTML content, preserve the formatting while cleaning up whitespace
         if isinstance(body, str):
@@ -956,7 +1216,7 @@ def get_issue_details(issue_key: str):
     }
     headers.update(get_jira_headers())  # Add authentication to existing headers
     params = {
-        "fields": "summary,status,priority,description,comment",
+        "fields": "summary,status,priority,description,comment,parent",
         "expand": "renderedFields"
     }
 
@@ -966,6 +1226,15 @@ def get_issue_details(issue_key: str):
         data = resp.json()
         fields = data.get("fields", {})
         rendered = data.get("renderedFields", {})
+
+        # Check if this is a Review issue - if so, return parent details instead
+        summary = fields.get("summary", "")
+        if summary.startswith("Review -"):
+            parent = fields.get("parent")
+            if parent:
+                parent_key = parent.get("key")
+                if parent_key:
+                    return get_issue_details(parent_key)
 
         # Extract and format the relevant fields
         issue_data = {
@@ -1010,3 +1279,238 @@ def get_issue_details(issue_key: str):
     except requests.exceptions.RequestException as e:
         print(f"Error fetching JIRA issue {issue_key}: {str(e)}")
         return None
+
+def fetch_issue_parent_info(issue_key: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetch parent information for a specific JIRA issue.
+    If the issue summary starts with 'Review -', returns grandparent instead of parent.
+    
+    Returns:
+        Dict with parent_key, parent_summary, or None if no parent found
+    """
+    print(f"[DEBUG] fetch_issue_parent_info called for {issue_key}")
+    if not issue_key:
+        print(f"[DEBUG] No issue_key provided, returning None")
+        return None
+
+    headers = get_jira_headers()
+    print(f"[DEBUG] Got JIRA headers, about to call _fetch_issue_details")
+    
+    # First, get the issue details including parent info
+    issue_details = _fetch_issue_details(issue_key, headers)
+    print(f"[DEBUG] _fetch_issue_details returned: {issue_details}")
+    if not issue_details:
+        print(f"Could not fetch details for issue {issue_key}")
+        return None    # Return the parent info (Review handling is already done in _fetch_issue_details)
+    parent_key = issue_details.get("parent_key")
+    if parent_key:
+        return {
+            "parent_key": parent_key,
+            "parent_summary": issue_details.get("parent_summary")
+        }
+    else:
+        print(f"Issue {issue_key}: No parent found")
+        return None
+
+
+def fetch_jira_subtasks_for_parent(autor: str, parent_key: str) -> List[dict]:
+    """
+    Fetch sub-tasks for a specific parent issue, filtered by author.
+    This supports hierarchical filtering where selecting a parent task (uloha) 
+    shows only its child tasks in the JIRA dropdown.
+    
+    Args:
+        autor: User email to filter sub-tasks by assignee
+        parent_key: Parent issue key (e.g., "PROJ-123")
+    
+    Returns:
+        List of sub-task dictionaries with keys: key, summary, assignee, etc.
+    """
+    try:
+        url = f"{JIRA_URL}/rest/api/3/issue/picker"
+        headers = get_jira_headers()
+        
+        # JQL to find sub-tasks of the parent issue assigned to the author
+        # This includes both direct sub-tasks and sub-sub-tasks (for Review workflows)
+        jql = f"""
+        assignee = '{autor}' AND (
+            parent = '{parent_key}' OR 
+            parent in issuesWithParent('{parent_key}')
+        )
+        """
+        
+        params = {
+            "query": "",
+            "currentJQL": jql.strip(),
+            "maxResults": 100,
+            "showSubTasks": "true"
+        }
+        
+        resp = requests.get(url, headers=headers, params=params)
+        
+        if resp.status_code == 410:
+            # Fallback to direct API if picker is deprecated
+            return _fetch_subtasks_direct_api(autor, parent_key)
+        
+        resp.raise_for_status()
+        result = resp.json()
+        sections = result.get('sections', [])
+        
+        # Collect issues from all sections
+        subtasks = []
+        for section in sections:
+            for issue in section.get('issues', []):
+                subtasks.append({
+                    "key": issue.get('key'),
+                    "summary": issue.get('summaryText', ''),
+                    "assignee": issue.get('keyHtml', ''),  # May contain assignee info
+                    "parent_key": None,  # Will be populated if needed
+                    "parent_summary": None,
+                    "parent_color": None,
+                })
+        
+        print(f"Found {len(subtasks)} sub-tasks for parent {parent_key} assigned to {autor}")
+        return subtasks
+        
+    except Exception as e:
+        print(f"Error fetching sub-tasks for parent {parent_key}: {e}")
+        return []
+
+
+def _fetch_subtasks_direct_api(autor: str, parent_key: str) -> List[dict]:
+    """
+    Fallback method using direct JIRA API for sub-task queries.
+    Used when the issue picker endpoint is not available.
+    """
+    try:
+        url = f"{JIRA_URL}/rest/api/3/search"
+        headers = get_jira_headers()
+        
+        # JQL to find sub-tasks with parent hierarchy support
+        jql = f"""
+        assignee = '{autor}' AND (
+            parent = '{parent_key}' OR 
+            parent in issuesWithParent('{parent_key}')
+        )
+        ORDER BY key ASC
+        """
+        
+        params = {
+            "jql": jql.strip(),
+            "maxResults": 100,
+            "fields": "key,summary,parent,assignee"
+        }
+        
+        resp = requests.get(url, headers=headers, params=params)
+        resp.raise_for_status()
+        
+        result = resp.json()
+        issues = result.get('issues', [])
+        
+        subtasks = []
+        for issue in issues:
+            fields = issue.get('fields', {})
+            subtasks.append({
+                "key": issue.get('key'),
+                "summary": fields.get('summary', ''),
+                "assignee": fields.get('assignee', {}).get('emailAddress', ''),
+                "parent_key": None,
+                "parent_summary": None, 
+                "parent_color": None,
+            })
+        
+        print(f"Found {len(subtasks)} sub-tasks via direct API for parent {parent_key}")
+        return subtasks
+        
+    except Exception as e:
+        print(f"Direct API sub-task fetch failed for parent {parent_key}: {e}")
+        return []
+
+
+def debug_jira_issue_visibility(issue_key: str) -> dict:
+    """
+    Debug why a specific JIRA issue might not be showing up in the regular query.
+    Tests various JQL queries to understand the issue's status.
+    """
+    results = {
+        "issue_key": issue_key,
+        "tests": {}
+    }
+    
+    try:
+        # Test 1: Check if issue exists at all
+        url = f"{JIRA_URL}/rest/api/3/issue/{issue_key}"
+        headers = get_jira_headers()
+        resp = requests.get(url, headers=headers)
+        
+        if resp.status_code == 200:
+            issue_data = resp.json()
+            fields = issue_data.get('fields', {})
+            
+            results["tests"]["issue_exists"] = True
+            results["issue_summary"] = fields.get('summary', 'N/A')
+            results["assignee"] = fields.get('assignee', {}).get('emailAddress', 'Unassigned') if fields.get('assignee') else 'Unassigned'
+            results["status"] = fields.get('status', {}).get('name', 'N/A')
+            
+            # Check sprint information
+            sprint_field = fields.get('customfield_10020', [])  # Sprint field
+            if sprint_field:
+                results["sprints"] = [sprint for sprint in sprint_field if isinstance(sprint, str)]
+            else:
+                results["sprints"] = []
+            
+            # Check if updated recently
+            updated = fields.get('updated', '')
+            results["updated"] = updated
+            
+        else:
+            results["tests"]["issue_exists"] = False
+            results["error"] = f"Issue not found: {resp.status_code}"
+            return results
+            
+        # Test 2: Test different JQL queries
+        test_queries = [
+            f"key = '{issue_key}'",
+            f"key = '{issue_key}' AND assignee = 'palko@metaapp.sk'",
+            f"assignee = 'palko@metaapp.sk' AND sprint in openSprints()",
+            f"assignee = 'palko@metaapp.sk' AND sprint in futureSprints()",
+            f"assignee = 'palko@metaapp.sk' AND updated >= -1d",
+            f"assignee = 'palko@metaapp.sk' AND (sprint in openSprints() OR sprint in futureSprints() OR updated >= -1d)"
+        ]
+        
+        for i, jql in enumerate(test_queries):
+            try:
+                search_url = f"{JIRA_URL}/rest/api/3/search"
+                params = {
+                    "jql": jql,
+                    "maxResults": 100,
+                    "fields": "key,summary"
+                }
+                
+                search_resp = requests.get(search_url, headers=headers, params=params)
+                if search_resp.status_code == 200:
+                    search_data = search_resp.json()
+                    issues = search_data.get('issues', [])
+                    found = any(issue['key'] == issue_key for issue in issues)
+                    results["tests"][f"query_{i+1}"] = {
+                        "jql": jql,
+                        "found": found,
+                        "total_results": len(issues)
+                    }
+                else:
+                    results["tests"][f"query_{i+1}"] = {
+                        "jql": jql,
+                        "error": f"Query failed: {search_resp.status_code}"
+                    }
+                    
+            except Exception as e:
+                results["tests"][f"query_{i+1}"] = {
+                    "jql": jql,
+                    "error": str(e)
+                }
+        
+        return results
+        
+    except Exception as e:
+        results["error"] = str(e)
+        return results

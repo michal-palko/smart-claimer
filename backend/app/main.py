@@ -1,24 +1,35 @@
 from fastapi import FastAPI, Depends, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from sqlalchemy.sql import text
 from typing import List, Optional
-from datetime import date
+from datetime import date, timedelta
 import os
 import httpx
 import json
 import time
 
 from . import models, schemas, database
-from .jira import fetch_jira_issues_for_author, fetch_jira_issue_by_key, get_issue_details
+from .jira import fetch_jira_issues_for_author, fetch_jira_issue_by_key, get_issue_details, fetch_jira_subtasks_for_parent
 from .metaapp_db import MetaAppSession
 
 models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI()
+
+def read_prompt_file(file_path: str, fallback: str) -> str:
+    """Read prompt from file, return fallback if file doesn't exist"""
+    try:
+        full_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", file_path)
+        if os.path.exists(full_path):
+            with open(full_path, 'r', encoding='utf-8') as f:
+                return f.read().strip()
+    except Exception as e:
+        print(f"Could not read prompt file {file_path}: {e}")
+    return fallback
 
 # Serve static frontend only at /frontend
 frontend_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "frontend")
@@ -32,11 +43,22 @@ def root():
 @app.get("/api/config")
 def get_config():
     """Get frontend configuration from environment variables"""
+    # Read prompts from files or fallback to env vars
+    whisper_prompt = read_prompt_file(
+        os.getenv("WHISPER_PROMPT_FILE", ""), 
+        os.getenv("WHISPER_PROMPT", "Popis práce, technické úlohy, programovanie v softverovej a datovej firme.")
+    )
+    
+    openai_prompt = read_prompt_file(
+        os.getenv("OPENAI_DEFAULT_PROMPT_FILE", ""),
+        os.getenv("OPENAI_DEFAULT_PROMPT", "Pomôž mi napísať lepší popis práce na základe poskytnutých informácií o JIRA úlohe a aktuálneho popisu. Buď konkrétny a technický.")
+    )
+    
     return {
         "whisper": {
             "apiUrl": os.getenv("WHISPER_API_URL", "http://whisper-api:3001/transcribe"),
             "language": os.getenv("WHISPER_LANGUAGE", "sk"),
-            "prompt": os.getenv("WHISPER_PROMPT", "Popis práce, technické úlohy, programovanie v softverovej a datovej firme."),
+            "prompt": whisper_prompt,
             "temperature": float(os.getenv("WHISPER_TEMPERATURE", "0.2")),
             "maxRecordingTime": int(os.getenv("WHISPER_MAX_RECORDING_TIME", "300"))
         },
@@ -45,7 +67,7 @@ def get_config():
             "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             "maxTokens": int(os.getenv("OPENAI_MAX_TOKENS", "500")),
             "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
-            "defaultPrompt": os.getenv("OPENAI_DEFAULT_PROMPT", "Pomôž mi napísať lepší popis práce na základe poskytnutých informácií o JIRA úlohe a aktuálneho popisu. Buď konkrétny a technický.")
+            "defaultPrompt": openai_prompt
         }
     }
 
@@ -150,6 +172,16 @@ def list_time_entries(
     from_date: Optional[date] = Query(None, alias="from"),
     to_date: Optional[date] = Query(None, alias="to")
 ):
+    if from_date is None or to_date is None:
+        # Default to current month and the immediately preceding month when filters are absent
+        today = date.today()
+        first_day_current_month = today.replace(day=1)
+        first_day_previous_month = (first_day_current_month - timedelta(days=1)).replace(day=1)
+        if from_date is None:
+            from_date = first_day_previous_month
+        if to_date is None:
+            to_date = today
+
     query = db.query(models.TimeEntry)
     if from_date:
         query = query.filter(models.TimeEntry.datum >= from_date)
@@ -224,9 +256,32 @@ def delete_template(template_id: int, autor: str = Query(...), db: Session = Dep
 @app.get("/jira-issues", response_model=List[schemas.JiraIssue])
 def get_jira_issues(autor: str = Query(...)):
     try:
-        return fetch_jira_issues_for_author(autor)
+        issues = fetch_jira_issues_for_author(autor)
+        meta = getattr(fetch_jira_issues_for_author, "last_meta", {}) or {}
+        headers = {}
+        if meta.get("source"):
+            headers["X-Smartclaimer-Jira-Source"] = str(meta["source"])
+        if meta.get("limit") is not None:
+            headers["X-Smartclaimer-Jira-Limit"] = str(meta["limit"])
+        if meta.get("requested") is not None:
+            headers["X-Smartclaimer-Jira-Requested"] = str(meta["requested"])
+        if meta.get("returned") is not None:
+            headers["X-Smartclaimer-Jira-Returned"] = str(meta["returned"])
+        if meta.get("reported_total") is not None:
+            headers["X-Smartclaimer-Jira-Total"] = str(meta["reported_total"])
+        if meta.get("note"):
+            headers["X-Smartclaimer-Jira-Note"] = str(meta["note"])
+        return JSONResponse(content=issues, headers=headers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"JIRA fetch failed: {e}")
+
+@app.get("/jira-subtasks", response_model=List[schemas.JiraIssue])
+def get_jira_subtasks(autor: str = Query(...), parent_key: str = Query(...)):
+    """Get sub-tasks for a specific parent issue, filtered by author"""
+    try:
+        return fetch_jira_subtasks_for_parent(autor, parent_key)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"JIRA subtasks fetch failed: {e}")
 
 @app.get("/api/validate-jira")
 def validate_jira_key(key: str = Query(...)):
@@ -361,6 +416,27 @@ async def openai_chat_proxy(request_data: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
 
+@app.get("/api/jira-debug/{issue_key}")
+async def get_jira_issue_debug(issue_key: str):
+    """Debug endpoint to see raw JIRA data structure."""
+    from .jira import get_jira_headers
+    import requests
+    
+    headers = get_jira_headers()
+    url = f"{os.getenv('JIRA_URL')}/rest/api/2/issue/{issue_key}"
+    params = {
+        "fields": "key,summary,parent,customfield_10014,customfield_10016,customfield_10020,issuetype"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise HTTPException(status_code=response.status_code, detail=f"JIRA API error: {response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
 @app.get("/api/jira/{issue_key}")
 async def get_jira_issue_for_ai(issue_key: str):
     """Fetch detailed JIRA issue information for AI assistant."""
@@ -372,6 +448,126 @@ async def get_jira_issue_for_ai(issue_key: str):
         raise HTTPException(status_code=404, detail=f"Issue {issue_key} not found or error occurred")
     
     return issue_data
+
+@app.get("/api/jira-parent/{issue_key}")
+async def get_jira_issue_parent(issue_key: str):
+    """Fetch parent information for a specific JIRA issue. If issue starts with 'Review -', returns grandparent."""
+    print(f"[DEBUG] get_jira_issue_parent called for {issue_key}")
+    if not issue_key:
+        raise HTTPException(status_code=400, detail="Issue key is required")
+    
+    from .jira import fetch_issue_parent_info
+    
+    parent_info = fetch_issue_parent_info(issue_key)
+    if not parent_info:
+        raise HTTPException(status_code=404, detail=f"Parent information for issue {issue_key} not found")
+    
+    return parent_info
+
+@app.get("/api/debug-jira/{issue_key}")
+def debug_jira_issue(issue_key: str):
+    """Debug why a specific JIRA issue might not be showing up"""
+    try:
+        from .jira import debug_jira_issue_visibility
+        return debug_jira_issue_visibility(issue_key)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Debug failed: {e}")
+
+@app.get("/api/test-backlog-sprint")
+def test_backlog_sprint_query(autor: str = Query("palko@metaapp.sk")):
+    """Test if there are any backlog items in active sprints"""
+    try:
+        from .jira import _fetch_jira_with_issue_picker
+        
+        # Test just the backlog + active sprint part
+        import requests
+        from .jira import get_jira_headers, JIRA_URL
+        
+        url = f"{JIRA_URL}/rest/api/3/issue/picker"
+        headers = get_jira_headers()
+        
+        # Test query: only backlog items in active sprints
+        test_jql = f"assignee = '{autor}' AND status = 'Backlog' AND sprint in openSprints()"
+        
+        params = {
+            "query": "",
+            "currentJQL": test_jql,
+            "maxResults": 50,
+            "showSubTasks": "true"
+        }
+        
+        resp = requests.get(url, headers=headers, params=params)
+        if not resp.ok:
+            return {"error": f"Query failed: {resp.status_code}", "jql": test_jql}
+        
+        result = resp.json()
+        sections = result.get('sections', [])
+        
+        issues = []
+        for section in sections:
+            section_issues = section.get('issues', [])
+            for issue in section_issues:
+                key = issue.get('key', '')
+                summary = issue.get('summaryText') or issue.get('summary', '')
+                if key and summary:
+                    issues.append({"key": key, "summary": summary})
+        
+        return {
+            "jql": test_jql,
+            "backlog_items_in_active_sprints": len(issues),
+            "issues": issues
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Test failed: {e}")
+
+@app.get("/api/jira-issue/{issue_key}")
+async def get_jira_issue_details(issue_key: str):
+    """Fetch any JIRA issue by key (without assignee restrictions) - used for manually entered issues"""
+    if not issue_key:
+        raise HTTPException(status_code=400, detail="Issue key is required")
+    
+    try:
+        from .jira import get_jira_headers, JIRA_URL
+        import requests
+        
+        # Fetch issue details without assignee restriction
+        url = f"{JIRA_URL}/rest/api/3/issue/{issue_key}"
+        headers = get_jira_headers()
+        params = {"fields": "key,summary,parent,assignee,status,sprint"}
+        
+        resp = requests.get(url, headers=headers, params=params)
+        
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"JIRA issue {issue_key} not found")
+        elif not resp.ok:
+            raise HTTPException(status_code=500, detail=f"JIRA API error: {resp.status_code}")
+        
+        issue_data = resp.json()
+        fields = issue_data.get('fields', {})
+        
+        # Extract basic info
+        result = {
+            "key": issue_key,
+            "summary": fields.get('summary', ''),
+            "parent_key": None,
+            "parent_summary": None,
+            "assignee": fields.get('assignee', {}).get('emailAddress', 'Unassigned') if fields.get('assignee') else 'Unassigned',
+            "status": fields.get('status', {}).get('name', 'Unknown')
+        }
+        
+        # Extract parent information
+        parent = fields.get('parent')
+        if parent:
+            result["parent_key"] = parent.get('key')
+            parent_fields = parent.get('fields', {})
+            result["parent_summary"] = parent_fields.get('summary', '')
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch issue: {e}")
 
 @app.post("/import-from-metaapp")
 def import_from_metaapp(request: dict = Body(...), db: Session = Depends(get_db)):
