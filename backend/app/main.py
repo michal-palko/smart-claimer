@@ -416,6 +416,35 @@ async def openai_chat_proxy(request_data: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
 
+@app.get("/api/jira-parent/{issue_key}")
+async def get_jira_issue_parent(issue_key: str):
+    """Fetch parent information for a JIRA issue. For Review issues, returns grandparent."""
+    if not issue_key:
+        raise HTTPException(status_code=400, detail="Issue key is required")
+    
+    from .jira import get_jira_headers, _fetch_issue_details
+    
+    print(f"[API] get_jira_issue_parent called for {issue_key}")
+    
+    try:
+        headers = get_jira_headers()
+        issue_details = _fetch_issue_details(issue_key, headers)
+        
+        if not issue_details:
+            raise HTTPException(status_code=404, detail=f"Issue {issue_key} not found")
+        
+        parent_info = {
+            "parent_key": issue_details.get("parent_key"),
+            "parent_summary": issue_details.get("parent_summary")
+        }
+        
+        print(f"[API] Returning parent info for {issue_key}: {parent_info}")
+        return parent_info
+        
+    except Exception as e:
+        print(f"[API] Error fetching parent for {issue_key}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching parent: {str(e)}")
+
 @app.get("/api/jira-debug/{issue_key}")
 async def get_jira_issue_debug(issue_key: str):
     """Debug endpoint to see raw JIRA data structure."""

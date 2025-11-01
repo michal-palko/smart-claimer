@@ -230,20 +230,38 @@ def _fetch_jira_with_issue_picker(autor: str) -> List[dict]:
         print("✗ CARTV-60 NOT found in issue picker results")
         print(f"JQL used: {enhanced_jql}")
     
-    # Return basic issue information without parent details for better performance
+    # Enrich issues with parent information when possible
     enhanced_issues = []
-    
+    headers = get_jira_headers()
+
+    print(f"[ENRICHMENT] Starting parent enrichment for {len(issue_keys)} issues")
     for issue_key in issue_keys:
-        enhanced_issues.append({
-            "key": issue_key,
-            "summary": issue_summaries[issue_key],
-            "parent_key": None,
-            "parent_summary": None,
-            "parent_color": None,
-            "sprint_name": None
-        })
-    
-    print(f"Returned {len(enhanced_issues)} issues without parent information for faster loading")
+        details = None
+        try:
+            print(f"[ENRICHMENT] Fetching details for {issue_key}")
+            details = _fetch_issue_details(issue_key, headers)
+            if details:
+                print(f"[ENRICHMENT] ✓ Got details for {issue_key}: parent_key={details.get('parent_key')}")
+            else:
+                print(f"[ENRICHMENT] ✗ No details returned for {issue_key}")
+        except Exception as detail_exc:
+            print(f"[ENRICHMENT] ✗ Failed to fetch details for {issue_key}: {detail_exc}")
+
+        if details:
+            if not details.get("summary"):
+                details["summary"] = issue_summaries.get(issue_key, "")
+            enhanced_issues.append(details)
+        else:
+            enhanced_issues.append({
+                "key": issue_key,
+                "summary": issue_summaries.get(issue_key, ""),
+                "parent_key": None,
+                "parent_summary": None,
+                "parent_color": None,
+                "sprint_name": None
+            })
+
+    print(f"Returned {len(enhanced_issues)} issues (issue picker with parent enrichment)")
     meta = {
         "source": "issue_picker",
         "limit": params.get("maxResults"),
@@ -319,21 +337,27 @@ def _fetch_issue_details(issue_key: str, headers: dict) -> Optional[Dict[str, An
     
     # Special handling for Review issues - use grandparent as uloha
     issue_summary = fields.get('summary', '') or ""
+    print(f"[PARENT LOOKUP] Issue {issue_key}: summary='{issue_summary}', has_parent={result['parent_key'] is not None}")
     if issue_summary.lower().startswith('review') and result["parent_key"]:
+        print(f"[REVIEW DETECTED] {issue_key} is a Review issue, fetching grandparent for parent {result['parent_key']}")
         try:
             # For Review issues, fetch the parent of parent (grandparent)
             grandparent_info = _fetch_grandparent_info(result["parent_key"], headers)
             if grandparent_info:
+                print(f"[GRANDPARENT FOUND] {issue_key}: Replacing parent {result['parent_key']} with grandparent {grandparent_info['key']}")
                 # Replace parent with grandparent for Review issues
                 result["parent_key"] = grandparent_info["key"]
                 result["parent_summary"] = grandparent_info["summary"]
                 result["parent_color"] = grandparent_info["color"]
-                print(f"Review issue {issue_key}: Using grandparent {grandparent_info['key']} as uloha")
+                print(f"✓ Review issue {issue_key}: Using grandparent {grandparent_info['key']} as uloha")
             else:
-                print(f"Review issue {issue_key}: No grandparent found, keeping original parent")
+                print(f"✗ Review issue {issue_key}: No grandparent found, keeping original parent {result['parent_key']}")
         except Exception as e:
-            print(f"Failed to fetch grandparent for review issue {issue_key}: {e}")
+            print(f"✗ Failed to fetch grandparent for review issue {issue_key}: {e}")
             # Keep original parent if grandparent fetch fails
+    else:
+        if result["parent_key"]:
+            print(f"[REGULAR ISSUE] {issue_key}: Using parent {result['parent_key']} as uloha")
     
     # Extract sprint information if available
     sprint_field = fields.get('customfield_10020')  # Common sprint field

@@ -1,0 +1,10 @@
+Popis práce, technické úlohy, programovanie v softverovej a datovej firme.
+
+KONTEXT:
+- Záznam hlasových poznámok pre časové vykazovanie
+- Technické úlohy a programátorská práca
+- Review kódu, analýza, implementácia funkcií
+- Stretnutia, plánovanie, dokumentácia
+
+KĽÚČOVÉ SLOVÁ:
+reviewer, issue, view, implementacia, testovanie, debugging, analýza, dokumentácia, meeting, planning, research, development, deployment, configuration, optimization

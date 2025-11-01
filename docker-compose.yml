@@ -44,6 +44,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./frontend:/app/frontend:ro
+      - ./backend:/app/backend:ro
     # # Resource limits for Pi (optional)
     # deploy:
     #   resources:

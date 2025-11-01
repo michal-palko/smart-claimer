@@ -1099,10 +1099,16 @@ async function fetchJiraIssues(author) {
             const cacheObj = JSON.parse(cacheStr);
             const cacheAge = Date.now() - (cacheObj?.ts || 0);
             const cacheAgeHours = Math.round(cacheAge / (60*60*1000) * 10) / 10;
+            const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
 
-            // Cache is valid if less than 30 minutes old and has data
-            const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes in milliseconds
-            if (cacheObj && Array.isArray(cacheObj.data) && cacheObj.ts && cacheAge < CACHE_DURATION) {
+            const hasParentMetadata = Array.isArray(cacheObj?.data)
+                ? cacheObj.data.every(issue =>
+                    Object.prototype.hasOwnProperty.call(issue, 'parent_key') &&
+                    Object.prototype.hasOwnProperty.call(issue, 'parent_summary')
+                )
+                : false;
+
+            if (cacheObj && Array.isArray(cacheObj.data) && cacheObj.ts && cacheAge < CACHE_DURATION && hasParentMetadata) {
                 jiraIssuesCache = cacheObj.data;
                 jiraIssuesLoadedFor = author;
                 jiraLoading = false;
@@ -1115,20 +1121,22 @@ async function fetchJiraIssues(author) {
                 });
                 return jiraIssuesCache;
             }
-            
-            // Cache is expired
-            console.log('[JIRA Cache] Cache expired:', {
+
+            const reason = !hasParentMetadata ? 'missing parent metadata' : 'age > 30 minutes';
+            console.log('[JIRA Cache] Cache invalid:', {
                 author,
                 cacheAge: cacheAgeHours + ' hours',
-                reason: 'age > 30 minutes',
-                source: 'expired'
+                reason,
+                source: 'cache-invalidated'
             });
+            localStorage.removeItem(cacheKey);
         } catch (e) {
             console.log('[JIRA Cache] Failed to parse localStorage cache:', {
                 author,
                 error: e.message,
                 source: 'parse-error'
             });
+            localStorage.removeItem(cacheKey);
         }
     }
     jiraLoading = true;
@@ -1156,7 +1164,9 @@ async function fetchJiraIssues(author) {
             author,
             issueCount: data.length,
             duration: Math.round(fetchDuration) + 'ms',
-            source: 'api-success'
+            source: 'api-success',
+            sampleIssue: data[0], // Show first issue structure
+            hasParentKeys: data.filter(i => i.parent_key).length + ' issues with parent_key'
         });
 
         // Save to localStorage with timestamp
@@ -1490,19 +1500,47 @@ function attachJiraAutocomplete() {
             const el = suggestions[index];
             const key = el.getAttribute('data-key');
             const issue = jiraIssuesCache.find(issue => issue.key === key);
+            
+            console.log('[JIRA SELECTION - KEYBOARD]', {
+                selectedKey: key,
+                foundInCache: !!issue,
+                issueData: issue
+            });
+            
             jiraInput.value = issue && issue.summary ? `${key}: ${issue.summary}` : key;
             jiraInput.dataset.code = key;
             suggBox.style.display = 'none';
             jiraCurrentIndex = -1;
-            // --- Auto-populate Úloha field with parent code ---
-            if (issue && issue.parent_key) {
-                const parentSummary = issue.parent_summary || '';
-                form.uloha.value = parentSummary ? `${issue.parent_key}: ${parentSummary}` : issue.parent_key;
-                form.uloha.dataset.code = issue.parent_key;
-            } else {
-                form.uloha.value = '';
-                form.uloha.dataset.code = '';
-            }
+            
+            // --- Fetch parent information from API (no cache) ---
+            console.log('[JIRA SELECTION - KEYBOARD] Fetching parent info from API for:', key);
+            fetch(`/api/jira-parent/${key}`)
+                .then(response => response.json())
+                .then(data => {
+                    console.log('[JIRA SELECTION - KEYBOARD] Parent API response:', data);
+                    
+                    if (data.parent_key) {
+                        const parentSummary = data.parent_summary || '';
+                        const ulohaValue = parentSummary ? `${data.parent_key}: ${parentSummary}` : data.parent_key;
+                        
+                        console.log('[ULOHA AUTO-POPULATE - KEYBOARD]', {
+                            parentKey: data.parent_key,
+                            parentSummary: parentSummary,
+                            settingUlohaTo: ulohaValue
+                        });
+                        
+                        form.uloha.value = ulohaValue;
+                        form.uloha.dataset.code = data.parent_key;
+                    } else {
+                        console.log('[ULOHA AUTO-POPULATE - KEYBOARD] No parent_key in API response');
+                        form.uloha.value = '';
+                        form.uloha.dataset.code = '';
+                    }
+                })
+                .catch(error => {
+                    console.error('[JIRA SELECTION - KEYBOARD] Failed to fetch parent:', error);
+                    // Don't clear Úloha on error - let user fill manually
+                });
             if (form.uloha.value) {
                 updateJiraSuggestionsByUloha();
             }
@@ -1589,19 +1627,47 @@ function attachJiraAutocomplete() {
         if (el) {
             const key = el.getAttribute('data-key');
             const issue = jiraIssuesCache.find(issue => issue.key === key);
+            
+            console.log('[JIRA SELECTION]', {
+                selectedKey: key,
+                foundInCache: !!issue,
+                issueData: issue
+            });
+            
             jiraInput.value = issue && issue.summary ? `${key}: ${issue.summary}` : key;
             jiraInput.dataset.code = key;
             suggBox.style.display = 'none';
             jiraCurrentIndex = -1;
-            // --- Auto-populate Úloha field with parent code ---
-            if (issue && issue.parent_key) {
-                const parentSummary = issue.parent_summary || '';
-                form.uloha.value = parentSummary ? `${issue.parent_key}: ${parentSummary}` : issue.parent_key;
-                form.uloha.dataset.code = issue.parent_key;
-            } else {
-                form.uloha.value = '';
-                form.uloha.dataset.code = '';
-            }
+            
+            // --- Fetch parent information from API (no cache) ---
+            console.log('[JIRA SELECTION] Fetching parent info from API for:', key);
+            fetch(`/api/jira-parent/${key}`)
+                .then(response => response.json())
+                .then(data => {
+                    console.log('[JIRA SELECTION] Parent API response:', data);
+                    
+                    if (data.parent_key) {
+                        const parentSummary = data.parent_summary || '';
+                        const ulohaValue = parentSummary ? `${data.parent_key}: ${parentSummary}` : data.parent_key;
+                        
+                        console.log('[ULOHA AUTO-POPULATE]', {
+                            parentKey: data.parent_key,
+                            parentSummary: parentSummary,
+                            settingUlohaTo: ulohaValue
+                        });
+                        
+                        form.uloha.value = ulohaValue;
+                        form.uloha.dataset.code = data.parent_key;
+                    } else {
+                        console.log('[ULOHA AUTO-POPULATE] No parent_key in API response');
+                        form.uloha.value = '';
+                        form.uloha.dataset.code = '';
+                    }
+                })
+                .catch(error => {
+                    console.error('[JIRA SELECTION] Failed to fetch parent:', error);
+                    // Don't clear Úloha on error - let user fill manually
+                });
             // Don't call updateJiraSuggestionsByUloha() here to prevent reopening dropdown
         }
     });
